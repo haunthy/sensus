@@ -16,7 +16,11 @@ using SensusService.Exceptions;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-using Xamarin.Geolocation;
+using Plugin.Geolocator.Abstractions;
+using Plugin.Geolocator;
+using System.Collections.Generic;
+using System.Linq;
+using Plugin.Permissions.Abstractions;
 
 namespace SensusService.Probes.Location
 {
@@ -26,42 +30,30 @@ namespace SensusService.Probes.Location
     public class GpsReceiver
     {
         #region static members
+
         public static readonly GpsReceiver SINGLETON = new GpsReceiver();
 
         public static GpsReceiver Get()
         {
             return SINGLETON;
         }
+
         #endregion
 
         private event EventHandler<PositionEventArgs> PositionChanged;
 
-        private Geolocator _locator;
-        private int _desiredAccuracyMeters;
+        private IGeolocator _locator;
         private bool _readingIsComing;
         private ManualResetEvent _readingWait;
         private Position _reading;
         private int _readingTimeoutMS;
-        private int _minimumTimeHintMS;
+        private List<Tuple<EventHandler<PositionEventArgs>, bool>> _listenerHeadings;
 
         private readonly object _locker = new object();
 
-        public Geolocator Locator
+        public IGeolocator Locator
         {
             get { return _locator; }
-            set { _locator = value; }
-        }
-
-        public int DesiredAccuracyMeters
-        {
-            get { return _desiredAccuracyMeters; }
-            set
-            {
-                _desiredAccuracyMeters = value;
-
-                if (_locator != null)
-                    _locator.DesiredAccuracy = _desiredAccuracyMeters;
-            }
         }
 
         private bool ListeningForChanges
@@ -74,79 +66,120 @@ namespace SensusService.Probes.Location
             // because GPS is only so accurate, successive readings can fire the trigger even if one is not moving -- if the threshold is too small. theoretically
             // the minimum value of the threshold should be equal to the desired accuracy; however, the desired accuracy is just a request. use 2x the desired
             // accuracy just to be sure.
-            get { return 2 * _desiredAccuracyMeters; }
+            get { return (int)(2 * _locator.DesiredAccuracy); }
         }
 
         private GpsReceiver()
         {
-            _desiredAccuracyMeters = 50;  // setting this too low appears to result in very delayed GPS fixes.
             _readingIsComing = false;
             _readingWait = new ManualResetEvent(false);
             _reading = null;
             _readingTimeoutMS = 120000;
-            _minimumTimeHintMS = 5000;
-        }
-
-        public void Initialize(Geolocator locator)
-        {
-            _locator = locator;
-            _locator.DesiredAccuracy = _desiredAccuracyMeters;
-
+            _locator = CrossGeolocator.Current;
+            _listenerHeadings = new List<Tuple<EventHandler<PositionEventArgs>, bool>>();
             _locator.PositionChanged += (o, e) =>
             {
                 SensusServiceHelper.Get().Logger.Log("GPS position has changed.", LoggingLevel.Verbose, GetType());
-                
+
                 if (PositionChanged != null)
                     PositionChanged(o, e);
             };
         }
 
-        public void AddListener(EventHandler<PositionEventArgs> listener)
+        public async void AddListener(EventHandler<PositionEventArgs> listener, bool includeHeading)
         {      
-            lock (_locker)
-            {      
-                if (_locator == null)
-                    throw new Exception("Locator has not yet been bound to a platform-specific implementation.");        
-                       
-                if (ListeningForChanges)
-                    _locator.StopListening();      
+            if (SensusServiceHelper.Get().ObtainPermission(Permission.Location) != PermissionStatus.Granted)
+                throw new Exception("Could not access GPS.");
+
+            // if we're already listening, stop listening first so that the locator can be configured with
+            // the most recent listening settings below.
+            if (ListeningForChanges)
+                await _locator.StopListeningAsync();      
                       
-                PositionChanged += listener;       
-                       
-                _locator.StartListening(_minimumTimeHintMS, _desiredAccuracyMeters, true);     
-                       
-                SensusServiceHelper.Get().Logger.Log("GPS receiver is now listening for changes.", LoggingLevel.Normal, GetType());        
-            }      
-        }
-               
-        public void RemoveListener(EventHandler<PositionEventArgs> listener)
-        {      
-            lock (_locker)
-            {      
-                if (_locator == null)
-                    throw new Exception("Locator has not yet been bound to a platform-specific implementation.");        
-                       
-                if (ListeningForChanges)
-                    _locator.StopListening();      
-                       
-                PositionChanged -= listener;       
-                       
-                if (ListeningForChanges)
-                    _locator.StartListening(_minimumTimeHintMS, _desiredAccuracyMeters, true);
-                else
-                    SensusServiceHelper.Get().Logger.Log("All listeners removed from GPS receiver. Stopped listening.", LoggingLevel.Normal, GetType());       
-            }      
+            // add new listener
+            PositionChanged += listener;
+            _listenerHeadings.Add(new Tuple<EventHandler<PositionEventArgs>, bool>(listener, includeHeading));
+
+            _locator.DesiredAccuracy = SensusServiceHelper.Get().GpsDesiredAccuracyMeters;
+
+            await _locator.StartListeningAsync(SensusServiceHelper.Get().GpsMinTimeDelayMS, SensusServiceHelper.Get().GpsMinDistanceDelayMeters, _listenerHeadings.Any(t => t.Item2), GetListenerSettings());
+
+            SensusServiceHelper.Get().Logger.Log("GPS receiver is now listening for changes.", LoggingLevel.Normal, GetType());        
         }
 
+        public async void RemoveListener(EventHandler<PositionEventArgs> listener)
+        {      
+            if (ListeningForChanges)
+                await _locator.StopListeningAsync();      
+                       
+            PositionChanged -= listener;  
+
+            _listenerHeadings.RemoveAll(t => t.Item1 == listener);
+                       
+            if (ListeningForChanges)
+                await _locator.StartListeningAsync(SensusServiceHelper.Get().GpsMinTimeDelayMS, SensusServiceHelper.Get().GpsMinDistanceDelayMeters, _listenerHeadings.Any(t => t.Item2), GetListenerSettings());
+            else
+                SensusServiceHelper.Get().Logger.Log("All listeners removed from GPS receiver. Stopped listening.", LoggingLevel.Normal, GetType());       
+        }
+
+        private ListenerSettings GetListenerSettings()
+        {
+            ListenerSettings settings = null;
+
+            #if __IOS__
+            float gpsDeferralDistanceMeters = SensusServiceHelper.Get().GpsDeferralDistanceMeters;
+            float gpsDeferralTimeMinutes = SensusServiceHelper.Get().GpsDeferralTimeMinutes;
+
+            settings = new ListenerSettings
+            {
+                AllowBackgroundUpdates = true,
+                PauseLocationUpdatesAutomatically = SensusServiceHelper.Get().GpsPauseLocationUpdatesAutomatically,
+                ActivityType = SensusServiceHelper.Get().GpsActivityType,
+                ListenForSignificantChanges = SensusServiceHelper.Get().GpsListenForSignificantChanges,
+                DeferLocationUpdates = SensusServiceHelper.Get().GpsDeferLocationUpdates,
+                DeferralDistanceMeters = gpsDeferralDistanceMeters < 0 ? default(double?) : gpsDeferralDistanceMeters,
+                DeferralTime = gpsDeferralTimeMinutes < 0 ? default(TimeSpan?) : TimeSpan.FromMinutes(gpsDeferralTimeMinutes)
+            };
+            #endif
+
+            return settings;
+        }
+
+        /// <summary>
+        /// Gets a GPS reading. Will block the current thread while waiting for a GPS reading. Should not
+        /// be called from the main / UI thread, since GPS runs on main thread (will deadlock).
+        /// </summary>
+        /// <returns>The reading.</returns>
+        /// <param name="cancellationToken">Cancellation token.</param>
         public Position GetReading(CancellationToken cancellationToken)
         {
             return GetReading(0, cancellationToken);
         }
 
+        /// <summary>
+        /// Gets a GPS reading, reusing an old one if it isn't too old. Will block the current thread while waiting for a GPS reading. Should not
+        /// be called from the main / UI thread, since GPS runs on main thread (will deadlock).
+        /// </summary>
+        /// <returns>The reading.</returns>
+        /// <param name="maxReadingAgeForReuseMS">Maximum age of old reading to reuse (milliseconds).</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
         public Position GetReading(int maxReadingAgeForReuseMS, CancellationToken cancellationToken)
         {  
             lock (_locker)
             {
+
+                try
+                {
+                    SensusServiceHelper.Get().AssertNotOnMainThread(GetType() + " GetReading");
+                }
+                catch (Exception)
+                {
+                    return null;
+                }
+
+                if (SensusServiceHelper.Get().ObtainPermission(Permission.Location) != PermissionStatus.Granted)
+                    return null;
+
                 // reuse existing reading if it isn't too old
                 if (_reading != null && maxReadingAgeForReuseMS > 0)
                 {
@@ -172,7 +205,8 @@ namespace SensusService.Probes.Location
                                 SensusServiceHelper.Get().Logger.Log("Taking GPS reading.", LoggingLevel.Debug, GetType());
 
                                 DateTimeOffset readingStart = DateTimeOffset.UtcNow;
-                                Position newReading = await _locator.GetPositionAsync(timeout: _readingTimeoutMS, cancelToken: cancellationToken);
+                                _locator.DesiredAccuracy = SensusServiceHelper.Get().GpsDesiredAccuracyMeters;
+                                Position newReading = await _locator.GetPositionAsync(timeoutMilliseconds: _readingTimeoutMS, token: cancellationToken);
                                 DateTimeOffset readingEnd = DateTimeOffset.UtcNow;
 
                                 if (newReading != null)

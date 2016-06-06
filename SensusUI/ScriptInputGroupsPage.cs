@@ -43,7 +43,7 @@ namespace SensusUI
                 InputGroup selectedInputGroup = _groupsList.SelectedItem as InputGroup;
                 int selectedIndex = script.InputGroups.IndexOf(selectedInputGroup);
 
-                List<string> actions = new string[] { "Edit", "Delete" }.ToList();
+                List<string> actions = new string[] { "Edit", "Copy", "Delete" }.ToList();
 
                 if (selectedIndex < script.InputGroups.Count - 1)
                     actions.Insert(0, "Move Down");
@@ -59,8 +59,8 @@ namespace SensusUI
                     script.InputGroups.Move(selectedIndex, selectedIndex + 1);
                 else if (selectedAction == "Edit")
                 {
-                    ScriptInputGroupPage inputGroupPage = new ScriptInputGroupPage(selectedInputGroup);
-
+                    List<InputGroup> previousInputGroups = _script.InputGroups.Where((inputGroup, index) => index < selectedIndex).ToList();
+                    ScriptInputGroupPage inputGroupPage = new ScriptInputGroupPage(selectedInputGroup, previousInputGroups);
                     inputGroupPage.Disappearing += (oo, ee) =>
                     {
                         Bind();
@@ -70,6 +70,8 @@ namespace SensusUI
 
                     _groupsList.SelectedItem = null;
                 }
+                else if (selectedAction == "Copy")
+                    script.InputGroups.Add(selectedInputGroup.Copy());
                 else if (selectedAction == "Delete")
                 {
                     if (await DisplayAlert("Delete " + selectedInputGroup.Name + "?", "This action cannot be undone.", "Delete", "Cancel"))

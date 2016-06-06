@@ -30,6 +30,17 @@ using SensusUI;
 using SensusService.Probes.Location;
 using SensusService.Exceptions;
 using SensusUI.Inputs;
+using SensusService.Probes.User;
+using SensusService.Probes.Apps;
+using SensusService.Probes.Movement;
+using System.Text;
+using Plugin.Geolocator.Abstractions;
+
+#if __IOS__
+using HealthKit;
+using Sensus.iOS.Probes.User.Health;
+using Foundation;
+#endif
 
 namespace SensusService
 {
@@ -40,24 +51,27 @@ namespace SensusService
     {
         #region static members
 
+        public const int GPS_DEFAULT_ACCURACY_METERS = 25;
+        public const int GPS_DEFAULT_MIN_TIME_DELAY_MS = 5000;
+        public const int GPS_DEFAULT_MIN_DISTANCE_DELAY_METERS = 50;
+
         public static void CreateAsync(string name, Action<Protocol> callback)
         {
-            new Thread(() =>
+            Probe.GetAllAsync(probes =>
                 {
-                    Probe.GetAllAsync(probes =>
-                        {
-                            Protocol protocol = new Protocol(name);
+                    Protocol protocol = new Protocol(name);
 
-                            foreach (Probe probe in probes)
-                                protocol.AddProbe(probe);
+                    foreach (Probe probe in probes)
+                        protocol.AddProbe(probe);
 
-                            callback(protocol);
-                        });
-                    
-                }).Start();
+                    SensusServiceHelper.Get().RegisterProtocol(protocol);
+
+                    if (callback != null)
+                        callback(protocol);
+                });
         }
 
-        public static void DisplayFromWebUriAsync(Uri webURI)
+        public static void DeserializeAsync(Uri webURI, Action<Protocol> callback)
         {
             try
             {
@@ -66,7 +80,17 @@ namespace SensusService
                 #if __ANDROID__ || __IOS__
                 downloadClient.DownloadDataCompleted += (o, e) =>
                 {
-                    DisplayFromBytesAsync(e.Result);
+                    if (e.Error == null)
+                        DeserializeAsync(e.Result, callback);
+                    else
+                    {
+                        string errorMessage = "Failed to download protocol from URI \"" + webURI + "\". If this is an HTTPS URI, make sure the server's certificate is valid. Message:  " + e.Error.Message;
+                        SensusServiceHelper.Get().Logger.Log(errorMessage, LoggingLevel.Normal, typeof(Protocol));
+                        SensusServiceHelper.Get().FlashNotificationAsync(errorMessage);
+
+                        if (callback != null)
+                            callback(null);
+                    }
                 };
                 #elif WINDOWS_PHONE
                 // TODO:  Read bytes and display.
@@ -74,68 +98,143 @@ namespace SensusService
                 #error "Unrecognized platform."
                 #endif
 
-                downloadClient.DownloadStringAsync(webURI);
+                downloadClient.DownloadDataAsync(webURI);
             }
             catch (Exception ex)
             {
-                SensusServiceHelper.Get().Logger.Log("Failed to download Protocol from URI \"" + webURI + "\":  " + ex.Message + ". If this is an HTTPS URI, make sure the server's certificate is valid.", LoggingLevel.Normal, typeof(Protocol));
-                SensusServiceHelper.Get().FlashNotificationAsync("Failed to download protocol.");
+                string errorMessage = "Failed to download protocol from URI \"" + webURI + "\". If this is an HTTPS URI, make sure the server's certificate is valid. Message:  " + ex.Message;
+                SensusServiceHelper.Get().Logger.Log(errorMessage, LoggingLevel.Normal, typeof(Protocol));
+                SensusServiceHelper.Get().FlashNotificationAsync(errorMessage);
+
+                if (callback != null)
+                    callback(null);
             }
         }
 
-        public static void DisplayFromBytesAsync(byte[] bytes)
+        public static void DeserializeAsync(byte[] bytes, Action<Protocol> callback)
         {
             try
             {
-                DisplayFromJsonAsync(SensusServiceHelper.Decrypt(bytes));
+                string json = SensusServiceHelper.Get().ConvertJsonForCrossPlatform(SensusServiceHelper.Decrypt(bytes));
+
+                DeserializeAsync(json, protocol =>
+                    {
+                        try
+                        {
+                            // don't reset the protocol id -- received protocols should remain in the same study.
+                            protocol.Reset(false);
+
+                            // see if we have already registered the newly deserialized protocol. when considering whether a registered
+                            // protocol is the match for the newly deserialized one, also check the protocols grouped with the registered
+                            // protocol. from the user's perspective these grouped protocols are not visible, but they should trigger
+                            // a match from an randomized experimental design perspective.
+                            Protocol registeredProtocol = null;
+                            foreach (Protocol p in SensusServiceHelper.Get().RegisteredProtocols)
+                                if (p.Equals(protocol) || p.GroupedProtocols.Contains(protocol) || protocol.GroupedProtocols.Contains(p))
+                                {
+                                    registeredProtocol = p;
+                                    break;
+                                }
+
+                            // if we haven't yet registered the protocol, then set it up and register it
+                            if (registeredProtocol == null)
+                            {
+                                #region if grouped protocols are available, replace the protocol with one randomly selected from those available
+                                if (protocol.GroupedProtocols.Count > 0)
+                                {
+                                    Random r = new Random();
+                                    int numProtocols = 1 + protocol.GroupedProtocols.Count;
+                                    int protocolIndex = r.Next(0, numProtocols);
+
+                                    // if protocol index == 0, then we should use the deserialized protocol -- no action is needed. if, on the other hand
+                                    // the protocol index > 0, then we need to swap in a new protocol.
+                                    if (protocolIndex > 0)
+                                    {
+                                        int replacementIndex = protocolIndex - 1;
+                                        Protocol replacementProtocol = protocol.GroupedProtocols[replacementIndex];
+
+                                        // rotate the configuration such that the replacement protocol has the other protocols as grouped protocols
+                                        replacementProtocol.GroupedProtocols.Clear();
+                                        replacementProtocol.GroupedProtocols.Add(protocol);
+                                        replacementProtocol.GroupedProtocols.AddRange(protocol.GroupedProtocols.Where(groupedProtocol => !groupedProtocol.Equals(replacementProtocol)));
+
+                                        // clear the original protocol's grouped protocols and swap in the replacement
+                                        protocol.GroupedProtocols.Clear();
+                                        protocol = replacementProtocol;
+                                    }
+                                }
+                                #endregion
+
+                                #region add any probes for the current platform that didn't come through when deserializing. for example, android has a listening WLAN probe, but iOS has a polling WLAN probe. neither will come through on the other platform when deserializing, since the types are not defined.
+                                ManualResetEvent probeSetupWait = new ManualResetEvent(false);
+                                Probe.GetAllAsync(probes =>
+                                    {                                        
+                                        List<Type> deserializedProbeTypes = protocol.Probes.Select(p => p.GetType()).ToList();
+
+                                        foreach (Probe probe in probes)
+                                            if (!deserializedProbeTypes.Contains(probe.GetType()))
+                                            {
+                                                SensusServiceHelper.Get().Logger.Log("Adding missing probe to protocol:  " + probe.GetType().FullName, LoggingLevel.Normal, typeof(Protocol));
+                                                protocol.AddProbe(probe);
+                                            }     
+
+                                        probeSetupWait.Set();
+                                    });
+
+                                probeSetupWait.WaitOne();
+                                #endregion
+
+                                SensusServiceHelper.Get().RegisterProtocol(protocol);
+                            }
+                            else
+                                protocol = registeredProtocol;
+
+                            // protocols deserialized upon receipt (i.e., those here) are never groupable for experimental integrity reasons. we
+                            // do not want the user to be able to group the newly deserialized protocol with other protocols and then share the 
+                            // resulting grouped protocol with other participants. the user's only option is to share the protocol as-is. of course,
+                            // if the protocol is unlocked then the user will be able to go edit the protocol and make it groupable. this is why
+                            // all protocols should be locked before deployment in an experiment.
+                            protocol.Groupable = false;
+                        }
+                        catch (Exception ex)
+                        {
+                            // if the protocol is null we'll have already flashed an error message with specific information. only need to flash a 
+                            // message here if something went wrong after successfully deserializing the protocol.
+                            if (protocol != null)
+                            {
+                                SensusServiceHelper.Get().Logger.Log("Failed to set up deserialized protocol:  " + ex.Message, LoggingLevel.Normal, typeof(Protocol));
+                                SensusServiceHelper.Get().FlashNotificationAsync("Failed to set up unpacked protocol.");
+                                protocol = null;
+                            }
+                        }
+                        finally
+                        {
+                            if (callback != null)
+                                callback(protocol);
+                        }
+                    });
             }
             catch (Exception ex)
             {
-                SensusServiceHelper.Get().Logger.Log("Failed to decrypt protocol from bytes:  " + ex.Message, LoggingLevel.Normal, typeof(Protocol));
-                SensusServiceHelper.Get().FlashNotificationAsync("Failed to decrypt protocol.");
-            }                        
+                SensusServiceHelper.Get().Logger.Log("Failed to decrypt/convert/deserialize protocol from bytes:  " + ex.Message, LoggingLevel.Normal, typeof(Protocol));
+                SensusServiceHelper.Get().FlashNotificationAsync("Failed to unpack protocol.");
+
+                if (callback != null)
+                    callback(null);
+            }
         }
 
-        /// <summary>
-        /// Converts JSON to a Protocol object. Private because Protocols should always be serialized as encrypted binary codes, and this function works with unencrypted strings (it's called in service of the former).
-        /// </summary>
-        /// <param name="json">JSON to deserialize.</param>
-        private static void DisplayFromJsonAsync(string json)
+        public static void DeserializeAsync(string json, Action<Protocol> callback)
         {
             new Thread(() =>
                 {
+                    Protocol protocol = null;
+
                     try
                     {
-                        #region allow protocols to be opened across platforms by manually editing the namespaces in the JSON
-                        string newJSON;
-                        switch (SensusServiceHelper.Get().GetType().Name)
-                        {
-                            case "AndroidSensusServiceHelper":
-                                newJSON = json.Replace(".iOS", ".Android").Replace(".WinPhone", ".Android");
-                                break;
-                            case "iOSSensusServiceHelper":
-                                newJSON = json.Replace(".Android", ".iOS").Replace(".WinPhone", ".iOS");
-                                break;
-                            case "WinPhone":
-                                newJSON = json.Replace(".Android", ".WinPhone").Replace(".iOS", ".WinPhone");
-                                break;
-                            default:
-                                throw new SensusException("Attempted to deserialize JSON into unknown service helper type:  " + SensusServiceHelper.Get().GetType().FullName);
-                        }
-
-                        if (newJSON == json)
-                            SensusServiceHelper.Get().Logger.Log("No cross-platform conversion required for service helper JSON.", LoggingLevel.Normal, typeof(Protocol));
-                        else
-                        {
-                            SensusServiceHelper.Get().Logger.Log("Performed cross-platform conversion of service helper JSON.", LoggingLevel.Normal, typeof(Protocol));
-                            json = newJSON;
-                        }
-                        #endregion
-                        
-                        Protocol protocol = null;
                         ManualResetEvent protocolWait = new ManualResetEvent(false);
 
-                        // always deserialize protocols on the main thread (e.g., since a looper might be required for android)
+                        // always deserialize protocols on the main thread (e.g., since a looper is required for android)
                         Device.BeginInvokeOnMainThread(() =>
                             {
                                 try
@@ -144,7 +243,7 @@ namespace SensusService
                                 }
                                 catch (Exception ex)
                                 {
-                                    SensusServiceHelper.Get().Logger.Log("Error while deserializing protocol:  " + ex.Message, LoggingLevel.Normal, typeof(Protocol));
+                                    SensusServiceHelper.Get().Logger.Log("Error while deserializing protocol from JSON:  " + ex.Message, LoggingLevel.Normal, typeof(Protocol));
                                 }
                                 finally
                                 {
@@ -156,58 +255,111 @@ namespace SensusService
 
                         if (protocol == null)
                         {
-                            SensusServiceHelper.Get().Logger.Log("Failed to deserialize protocol.", LoggingLevel.Normal, typeof(Protocol));
-                            SensusServiceHelper.Get().FlashNotificationAsync("Failed to deserialize protocol.");
-                            return;
+                            SensusServiceHelper.Get().Logger.Log("Failed to deserialize protocol from JSON.", LoggingLevel.Normal, typeof(Protocol));
+                            SensusServiceHelper.Get().FlashNotificationAsync("Failed to unpack protocol from JSON.");
                         }
-
-                        Probe.GetAllAsync(probes =>
-                            {
-                                // add any probes for the current platform that didn't come through when deserializing. for example, android has a listening WLAN probe, but iOS has a polling WLAN probe. neither will come through on the other platform when deserializing, since the types are not defined.
-                                List<Type> deserializedProbeTypes = protocol.Probes.Select(p => p.GetType()).ToList();
-
-                                foreach (Probe probe in probes)
-                                    if (!deserializedProbeTypes.Contains(probe.GetType()))
-                                    {
-                                        SensusServiceHelper.Get().Logger.Log("Adding missing probe to protocol:  " + probe.GetType().FullName, LoggingLevel.Normal, typeof(Protocol));
-                                        protocol.AddProbe(probe);
-                                    }                        
-
-                                // reset the random time anchor -- we shouldn't use the same one that someone else used
-                                protocol.ResetRandomTimeAnchor();
-
-                                // reset the protocol ID and storage directory
-                                protocol.StorageDirectory = null;
-                                while (protocol.StorageDirectory == null)
-                                {
-                                    protocol.Id = Guid.NewGuid().ToString();
-                                    string candidateStorageDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Personal), protocol.Id);
-                                    if (!Directory.Exists(candidateStorageDirectory))
-                                    {
-                                        protocol.StorageDirectory = candidateStorageDirectory;
-                                        Directory.CreateDirectory(protocol.StorageDirectory);
-                                    }
-                                }
-
-                                SensusServiceHelper.Get().RegisterProtocol(protocol);
-
-                                // open protocol in UI and prompt to start
-                                Device.BeginInvokeOnMainThread(async () =>
-                                    {
-                                        if (!(App.Current.MainPage.Navigation.NavigationStack.Last() is ProtocolsPage))
-                                            await App.Current.MainPage.Navigation.PushAsync(new ProtocolsPage());
-
-                                        protocol.StartWithUserAgreement("You just opened a protocol named \"" + protocol.Name + "\" within Sensus." + (string.IsNullOrWhiteSpace(protocol.StartupAgreement) ? "" : " Please read the following terms and conditions."));
-                                    });
-                            });
                     }
                     catch (Exception ex)
                     {
-                        SensusServiceHelper.Get().Logger.Log("Failed to deserialize/display protocol from JSON:  " + ex.Message, LoggingLevel.Normal, typeof(Protocol));
-                        SensusServiceHelper.Get().FlashNotificationAsync("Failed to deserialize and/or display protocol.");
+                        SensusServiceHelper.Get().Logger.Log("Failed to deserialize protocol from JSON:  " + ex.Message, LoggingLevel.Normal, typeof(Protocol));
+                        SensusServiceHelper.Get().FlashNotificationAsync("Failed to unpack protocol from JSON:  " + ex.Message);
+                    }
+
+                    if (callback != null)
+                        callback(protocol);
+
+                }).Start();
+        }
+
+        public static void DisplayAndStartAsync(Protocol protocol)
+        {
+            new Thread(() =>
+                {
+                    if (protocol == null)
+                        SensusServiceHelper.Get().FlashNotificationAsync("Protocol is empty. Cannot display or start it.");
+                    else if (protocol.Running)
+                        SensusServiceHelper.Get().FlashNotificationAsync("You are already participating in \"" + protocol.Name + "\".");
+                    else
+                    {                        
+                        Device.BeginInvokeOnMainThread(async () =>
+                            {
+                                // display the protocols page if it isn't already up
+                                ProtocolsPage protocolsPage = null;
+                                Page topPage = App.Current.MainPage.Navigation.NavigationStack.Last();
+                                if (topPage is ProtocolsPage)
+                                    protocolsPage = topPage as ProtocolsPage;
+                                else
+                                {
+                                    protocolsPage = new ProtocolsPage();
+                                    await App.Current.MainPage.Navigation.PushAsync(protocolsPage);
+                                }
+
+                                // ask user to start protocol
+                                protocol.StartWithUserAgreementAsync("You just opened \"" + protocol.Name + "\" within Sensus.", () =>
+                                    {
+                                        Device.BeginInvokeOnMainThread(() =>
+                                            {
+                                                // rebind to pick up any color changes
+                                                protocolsPage.Bind();
+                                            });
+                                    });
+                            });
                     }
 
                 }).Start();
+        }
+
+        public static void RunUnitTestingProtocol(Stream unitTestingProtocolFile)
+        {
+            try
+            {
+                // delete all current protocols -- we don't want them interfering with the one we're about to load/run.
+                foreach (Protocol protocol in SensusServiceHelper.Get().RegisteredProtocols)
+                    protocol.Delete();
+
+                using (MemoryStream protocolStream = new MemoryStream())
+                {
+                    unitTestingProtocolFile.CopyTo(protocolStream);
+                    string protocolJSON = SensusServiceHelper.Get().ConvertJsonForCrossPlatform(SensusServiceHelper.Decrypt(protocolStream.ToArray()));
+                    DeserializeAsync(protocolJSON, protocol =>
+                        {
+                            if (protocol == null)
+                                throw new Exception("Failed to deserialize unit testing protocol.");
+
+                            foreach (Probe probe in protocol.Probes)
+                            {
+                                // unit testing is problematic with probes that take us away from Sensus, since it's difficult to automate UI 
+                                // interaction outside of Sensus. disable any probes that might take us away from Sensus.
+
+                                if (probe is FacebookProbe)
+                                    probe.Enabled = false;
+
+                                #if __IOS__
+                                if (probe is iOSHealthKitProbe)
+                                    probe.Enabled = false;
+                                #endif
+
+                                // clear the run-times collection from any script runners. need a clean start, just in case we have one-shot scripts
+                                // that need to run every unit testing execution.
+                                if (probe is ScriptProbe)
+                                    foreach (ScriptRunner scriptRunner in (probe as ScriptProbe).ScriptRunners)
+                                        scriptRunner.RunTimes.Clear();
+
+                                // disable the accelerometer probe, since we use it to trigger a test script that can interrupt UI scripting.
+                                if (probe is AccelerometerProbe)
+                                    probe.Enabled = false;
+                            }
+
+                            DisplayAndStartAsync(protocol);
+                        });
+                }
+            }
+            catch (Exception ex)
+            {
+                string message = "Failed to run unit testing protocol:  " + ex.Message;
+                SensusServiceHelper.Get().Logger.Log(message, LoggingLevel.Normal, typeof(Protocol));
+                throw new Exception(message);
+            }
         }
 
         #endregion
@@ -221,14 +373,22 @@ namespace SensusService
         private LocalDataStore _localDataStore;
         private RemoteDataStore _remoteDataStore;
         private string _storageDirectory;
-        private ProtocolReport _mostRecentReport;
+        private ProtocolReportDatum _mostRecentReport;
         private bool _forceProtocolReportsToRemoteDataStore;
         private string _lockPasswordHash;
         private AnonymizedJsonContractResolver _jsonAnonymizer;
         private DateTimeOffset _randomTimeAnchor;
         private bool _shareable;
         private List<PointOfInterest> _pointsOfInterest;
-        private string _startupAgreement;
+        private string _description;
+        private int _participationHorizonDays;
+        private string _contactEmail;
+        private bool _groupable;
+        private List<Protocol> _groupedProtocols;
+        private float? _rewardThreshold;
+        private float _gpsDesiredAccuracyMeters;
+        private int _gpsMinTimeDelayMS;
+        private float _gpsMinDistanceDelayMeters;
 
         private readonly object _locker = new object();
 
@@ -255,16 +415,6 @@ namespace SensusService
         public bool Running
         {
             get { return _running; }
-            set
-            {
-                if (value != _running)
-                {
-                    if (value)
-                        StartAsync();
-                    else
-                        StopAsync();
-                }
-            }
         }
 
         public LocalDataStore LocalDataStore
@@ -296,11 +446,25 @@ namespace SensusService
         public string StorageDirectory
         {
             get { return _storageDirectory; }
-            set { _storageDirectory = value; }
+            set
+            {
+                _storageDirectory = value; 
+
+                if (!string.IsNullOrWhiteSpace(_storageDirectory) && !Directory.Exists(_storageDirectory))
+                {
+                    try
+                    {
+                        Directory.CreateDirectory(_storageDirectory);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
         }
 
         [JsonIgnore]
-        public ProtocolReport MostRecentReport
+        public ProtocolReportDatum MostRecentReport
         {
             get { return _mostRecentReport; }
             set { _mostRecentReport = value; }
@@ -356,24 +520,220 @@ namespace SensusService
             }
         }
 
-        [EditorUiProperty("Startup Agreement:", true, 15)]
-        public string StartupAgreement
-        {
-            get
-            {
-                return _startupAgreement;
-            }
-            set
-            {
-                _startupAgreement = value;
-            }
-        }
-
-
         public List<PointOfInterest> PointsOfInterest
         {
             get { return _pointsOfInterest; }
         }
+
+        [EditorUiProperty("Description:", true, 15)]
+        public string Description
+        {
+            get
+            {
+                return _description;
+            }
+            set
+            {
+                _description = value;
+            }
+        }
+
+        [EntryIntegerUiProperty("Participation Horizon (Days):", true, 16)]
+        public int ParticipationHorizonDays
+        {
+            get
+            {
+                return _participationHorizonDays;
+            }
+            set
+            {
+                _participationHorizonDays = value;
+            }
+        }
+
+        [JsonIgnore]
+        public DateTime ParticipationHorizon
+        {
+            get { return DateTime.Now.AddDays(-_participationHorizonDays); }
+        }
+
+        [EntryStringUiProperty("Contact Email:", true, 18)]
+        public string ContactEmail
+        {
+            get
+            {
+                return _contactEmail;
+            }
+            set
+            {
+                _contactEmail = value;
+            }
+        }
+
+        [OnOffUiProperty(null, true, 19)]
+        public bool Groupable
+        {
+            get
+            {
+                return _groupable;
+            }
+            set
+            {
+                _groupable = value;
+            }
+        }
+
+        public List<Protocol> GroupedProtocols
+        {
+            get
+            {
+                return _groupedProtocols;
+            }
+            set
+            {
+                _groupedProtocols = value;
+            }
+        }
+
+        [EntryFloatUiProperty("Reward Threshold:", true, 20)]
+        public float? RewardThreshold
+        {
+            get
+            {
+                return _rewardThreshold;
+            }
+            set
+            {
+                // if a threshold is given, force it to be in [0,1]
+                if (value != null)
+                {
+                    float threshold = value.GetValueOrDefault();
+                    if (threshold < 0)
+                    {
+                        SensusServiceHelper.Get().FlashNotificationAsync("Reward threshold must be between 0 and 1.");
+                        value = 0;
+                    }
+                    else if (threshold > 1)
+                    {
+                        SensusServiceHelper.Get().FlashNotificationAsync("Reward threshold must be between 0 and 1.");
+                        value = 1;
+                    }
+                }
+
+                _rewardThreshold = value;
+            }
+        }
+
+        [JsonIgnore]
+        public float Participation
+        {
+            get
+            { 
+                float[] participations = _probes.Select(probe => probe.GetParticipation())
+                                                .Where(participation => participation != null)
+                                                .Select(participation => participation.GetValueOrDefault())
+                                                .ToArray();
+
+                // there will not be any participations if all probes are disabled -- perfect participation by definition
+                if (participations.Length == 0)
+                    return 1;
+                else
+                    return participations.Average();
+            }
+        }
+
+        [EntryFloatUiProperty("GPS - Desired Accuracy (Meters):", true, 21)]
+        public float GpsDesiredAccuracyMeters
+        {
+            get { return _gpsDesiredAccuracyMeters; }
+            set
+            {
+                if (value <= 0)
+                    value = GPS_DEFAULT_ACCURACY_METERS;
+
+                _gpsDesiredAccuracyMeters = value;
+            }
+        }
+
+        [EntryIntegerUiProperty("GPS - Minimum Time Delay (MS):", true, 22)]
+        public int GpsMinTimeDelayMS
+        {
+            get { return _gpsMinTimeDelayMS; }
+            set
+            {
+                if (value < 0)
+                    value = GPS_DEFAULT_MIN_TIME_DELAY_MS;
+
+                _gpsMinTimeDelayMS = value;
+            }
+        }
+
+        [EntryFloatUiProperty("GPS - Minimum Distance Delay (Meters):", true, 23)]
+        public float GpsMinDistanceDelayMeters
+        {
+            get
+            {
+                return _gpsMinDistanceDelayMeters;
+            }
+            set
+            {
+                if (value < 0)
+                    value = GPS_DEFAULT_MIN_DISTANCE_DELAY_METERS;
+
+                _gpsMinDistanceDelayMeters = value;
+            }
+        }
+
+        #region iOS-specific protocol properties
+
+        #if __IOS__
+        [OnOffUiProperty("GPS - Pause Location Updates:", true, 25)]
+        public bool GpsPauseLocationUpdatesAutomatically { get; set; } = false;
+
+        [ListUiProperty("GPS - Pause Activity Type:", true, 26, new object[] { ActivityType.Other, ActivityType.AutomotiveNavigation, ActivityType.Fitness, ActivityType.OtherNavigation })]
+        public ActivityType GpsPauseActivityType { get; set; } = ActivityType.Other;
+
+        [OnOffUiProperty("GPS - Significant Changes:", true, 27)]
+        public bool GpsListenForSignificantChanges { get; set; } = false;
+
+        [OnOffUiProperty("GPS - Defer Location Updates:", true, 28)]
+        public bool GpsDeferLocationUpdates { get; set; } = false;
+
+        private float _gpsDeferralDistanceMeters = 500;
+
+        [EntryFloatUiProperty("GPS - Deferral Distance (Meters):", true, 29)]
+        public float GpsDeferralDistanceMeters
+        { 
+            get
+            { 
+                return _gpsDeferralDistanceMeters;
+            }
+            set
+            {
+                if (value < 0)
+                    value = -1;
+
+                _gpsDeferralDistanceMeters = value;
+            }
+        }
+
+        private float _gpsDeferralTimeMinutes = 5;
+
+        [EntryFloatUiProperty("GPS - Deferral Time (Mins.):", true, 30)]
+        public float GpsDeferralTimeMinutes
+        {
+            get { return _gpsDeferralTimeMinutes; }
+            set
+            {
+                if (value < 0)
+                    value = -1;
+
+                _gpsDeferralTimeMinutes = value;
+            }
+        }
+        #endif
+
+        #endregion
 
         /// <summary>
         /// For JSON deserialization
@@ -386,6 +746,13 @@ namespace SensusService
             _jsonAnonymizer = new AnonymizedJsonContractResolver(this);
             _shareable = false;
             _pointsOfInterest = new List<PointOfInterest>();
+            _participationHorizonDays = 1;   
+            _groupable = false;
+            _groupedProtocols = new List<Protocol>();
+            _rewardThreshold = null;
+            _gpsDesiredAccuracyMeters = GPS_DEFAULT_ACCURACY_METERS;
+            _gpsMinTimeDelayMS = GPS_DEFAULT_MIN_TIME_DELAY_MS;
+            _gpsMinDistanceDelayMeters = GPS_DEFAULT_MIN_DISTANCE_DELAY_METERS;
         }
 
         /// <summary>
@@ -396,21 +763,9 @@ namespace SensusService
             : this()
         {
             _name = name;
-
-            ResetRandomTimeAnchor();            
-
-            while (_storageDirectory == null)
-            {
-                _id = Guid.NewGuid().ToString();
-                string candidateStorageDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Personal), _id);
-                if (!Directory.Exists(candidateStorageDirectory))
-                {
-                    _storageDirectory = candidateStorageDirectory;
-                    Directory.CreateDirectory(_storageDirectory);
-                }
-            }
-
             _probes = new List<Probe>();
+
+            Reset(true);            
         }
 
         private void AddProbe(Probe probe)
@@ -425,12 +780,19 @@ namespace SensusService
             }
 
             _probes.Add(probe);
+            _probes.Sort(new Comparison<Probe>((p1, p2) => p1.DisplayName.CompareTo(p2.DisplayName)));
         }
 
-        private void ResetRandomTimeAnchor()
+        private void Reset(bool resetId)
         {
             // pick a random time within the first 1000 years AD.
             _randomTimeAnchor = new DateTimeOffset((long)(new Random().NextDouble() * new DateTimeOffset(1000, 1, 1, 0, 0, 0, new TimeSpan()).Ticks), new TimeSpan());
+
+            // reset id and storage directory (directory might exist if deserializing the same protocol multiple times)
+            if (resetId)
+                _id = Guid.NewGuid().ToString();
+
+            StorageDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Personal), _id);
         }
 
         public void Save(string path)
@@ -439,13 +801,34 @@ namespace SensusService
             {
                 byte[] encryptedBytes = SensusServiceHelper.Encrypt(JsonConvert.SerializeObject(this, SensusServiceHelper.JSON_SERIALIZER_SETTINGS));
                 file.Write(encryptedBytes, 0, encryptedBytes.Length);
-                file.Close();
             }
         }
 
-        public void StartAsync()
+        public void CopyAsync(bool resetId, bool register, Action<Protocol> callback = null)
         {
-            new Thread(Start).Start();
+            DeserializeAsync(JsonConvert.SerializeObject(this, SensusServiceHelper.JSON_SERIALIZER_SETTINGS), protocol =>
+                {
+                    // if the id needs to be reset, do it before registering the protocol since the id is used for registration checking.
+                    protocol.Reset(resetId);
+
+                    if (register)
+                        SensusServiceHelper.Get().RegisterProtocol(protocol);
+
+                    if (callback != null)
+                        callback(protocol);
+                });
+        }
+
+        public void StartAsync(Action callback = null)
+        {
+            new Thread(() =>
+                {
+                    Start();
+
+                    if (callback != null)
+                        callback();
+
+                }).Start();
         }
 
         public void Start()
@@ -460,8 +843,6 @@ namespace SensusService
                 if (ProtocolRunningChanged != null)
                     ProtocolRunningChanged(this, _running);
 
-                // let the service helper know that the current protocol is running (saves helper)
-                SensusServiceHelper.Get().RegisterProtocol(this);
                 SensusServiceHelper.Get().AddRunningProtocolId(_id);
 
                 bool stopProtocol = false;
@@ -485,6 +866,33 @@ namespace SensusService
                         // start probes
                         try
                         {
+                            // if we're on iOS, gather up all of the health-kit probes so that we can request their permissions in one batch
+                            #if __IOS__
+                            if (HKHealthStore.IsHealthDataAvailable)
+                            {
+                                List<iOSHealthKitProbe> enabledHealthKitProbes = new List<iOSHealthKitProbe>();
+                                foreach (Probe probe in _probes)
+                                    if (probe.Enabled && probe is iOSHealthKitProbe)
+                                        enabledHealthKitProbes.Add(probe as iOSHealthKitProbe);                                                                            
+
+                                if (enabledHealthKitProbes.Count > 0)
+                                {
+                                    NSSet objectTypesToRead = NSSet.MakeNSObjectSet<HKObjectType>(enabledHealthKitProbes.Select(probe => probe.ObjectType).Distinct().ToArray());
+                                    ManualResetEvent authorizationWait = new ManualResetEvent(false);
+                                    new HKHealthStore().RequestAuthorizationToShare(new NSSet(), objectTypesToRead,
+                                        (success, error) =>
+                                        {
+                                            if (error != null)
+                                                SensusServiceHelper.Get().Logger.Log("Error while requesting HealthKit authorization:  " + error.Description, LoggingLevel.Normal, GetType());
+
+                                            authorizationWait.Set();
+                                        });
+
+                                    authorizationWait.WaitOne();
+                                }
+                            }
+                            #endif
+
                             SensusServiceHelper.Get().Logger.Log("Starting probes for protocol " + _name + ".", LoggingLevel.Normal, GetType());
                             int probesEnabled = 0;
                             int probesStarted = 0;
@@ -496,27 +904,10 @@ namespace SensusService
                                     try
                                     {
                                         probe.Start();
-                                        probesStarted++;
+                                        ++probesStarted;
                                     }
-                                    catch (Exception ex)
-                                    {
-                                        // stop probe to clean up any inconsistent state information
-                                        try
-                                        {
-                                            probe.Stop();
-                                        }
-                                        catch (Exception ex2)
-                                        {
-                                            SensusServiceHelper.Get().Logger.Log("Failed to stop probe after failing to start it:  " + ex2.Message, LoggingLevel.Normal, GetType());
-                                        }
-
-                                        string message = "Failed to start probe \"" + probe.GetType().FullName + "\":  " + ex.Message;
-                                        SensusServiceHelper.Get().Logger.Log(message, LoggingLevel.Normal, GetType());
-                                        SensusServiceHelper.Get().FlashNotificationAsync(message);
-
-                                        // disable probe if it is not supported on the device
-                                        if (ex is NotSupportedException)
-                                            probe.Enabled = false;
+                                    catch (Exception)
+                                    {                                        
                                     }
                                 }
 
@@ -524,6 +915,13 @@ namespace SensusService
                                 throw new Exception("No probes were enabled.");
                             else if (probesStarted == 0)
                                 throw new Exception("No probes started.");
+                            else
+                            {
+                                // on android when the activity is stopped the service is restarted, which restarts the protocols. if the user then 
+                                // restarts the activity it can be confusing to see the flash message below since the user believes the protocol
+                                // was always running. so, don't retain the message for flashing later if it's not currently visibile.
+                                SensusServiceHelper.Get().FlashNotificationAsync("Started \"" + _name + "\".", false);
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -554,53 +952,89 @@ namespace SensusService
             }
         }
 
-        public void StartWithUserAgreement(string message)
+        public void StartWithUserAgreementAsync(string startupMessage, Action callback = null)
         {
+            if (!_probes.Any(probe => probe.Enabled))
+            {
+                SensusServiceHelper.Get().FlashNotificationAsync("Probes not enabled. Cannot start.");
+
+                if (callback != null)
+                    callback();
+        
+                return;
+            }
+
             int consentCode = new Random().Next(1000, 10000);
 
-            SensusServiceHelper.Get().PromptForInputsAsync(
-
-                "Protocol Consent", 
-
-                new Input[]
+            StringBuilder collectionDescription = new StringBuilder();
+            foreach (Probe probe in _probes.OrderBy(probe => probe.DisplayName))
+                if (probe.Enabled && probe.StoreData)
                 {
-                    new LabelOnlyInput(
-                        (string.IsNullOrWhiteSpace(message) ? "" : message + Environment.NewLine + Environment.NewLine) +
-                        (string.IsNullOrWhiteSpace(_startupAgreement) ? "" : _startupAgreement + Environment.NewLine + Environment.NewLine) +
-                        "To start this protocol, please indicate your consent by entering the following code:  " + consentCode),
+                    string probeCollectionDescription = probe.CollectionDescription;
+                    if (!string.IsNullOrWhiteSpace(probeCollectionDescription))
+                        collectionDescription.Append((collectionDescription.Length == 0 ? "" : Environment.NewLine) + probeCollectionDescription);
+                }
 
-                    new TextInput()
-                },
+            List<Input> consent = new List<Input>();
 
+            if (!string.IsNullOrWhiteSpace(startupMessage))
+                consent.Add(new LabelOnlyInput(startupMessage));
+
+            if (!string.IsNullOrWhiteSpace(_description))
+                consent.Add(new LabelOnlyInput(_description));
+
+            consent.Add(new LabelOnlyInput("This study would like to collect the following data from your device:"));
+
+            LabelOnlyInput collectionDescriptionLabel = null;
+            int collectionDescriptionFontSize = 15;
+            if (collectionDescription.Length == 0)
+                collectionDescriptionLabel = new LabelOnlyInput("No information will be collected.", collectionDescriptionFontSize);
+            else
+                collectionDescriptionLabel = new LabelOnlyInput(collectionDescription.ToString(), collectionDescriptionFontSize);
+
+            collectionDescriptionLabel.Padding = new Thickness(20, 0, 0, 0);
+
+            consent.Add(collectionDescriptionLabel);
+
+            // the name in the following text input is used to grab the UI element when unit testing
+            consent.Add(new SingleLineTextInput("ConsentCode", "To participate in this study as described above, please indicate your consent by entering the following code:  " + consentCode, Keyboard.Numeric)
+                {
+                    DisplayNumber = false
+                });
+
+            SensusServiceHelper.Get().PromptForInputsAsync(
+                "Protocol Consent", 
+                consent.ToArray(),
+                null,
+                true,
+                null,
+                "Are you sure you would like cancel your enrollment in this study?",
+                null,
+                null,
+                false,
                 inputs =>
                 {
-                    if (inputs == null)
-                        return;
+                    if (inputs != null)
+                    {
+                        string consentCodeStr = inputs.Last().Value as string;
 
-                    string consentCodeStr = inputs[1].Value as string;
+                        int consentCodeInt;
+                        if (int.TryParse(consentCodeStr, out consentCodeInt) && consentCodeInt == consentCode)
+                            Start();
+                        else
+                            SensusServiceHelper.Get().FlashNotificationAsync("Incorrect code entered.");
+                    }
 
-                    int consentCodeInt;
-                    if (consentCodeStr == null)
-                        return;
-                    else if (int.TryParse(consentCodeStr, out consentCodeInt) && consentCodeInt == consentCode)
-                        Running = true;
-                    else
-                        SensusServiceHelper.Get().FlashNotificationAsync("Incorrect code entered.");
+                    if (callback != null)
+                        callback();
                 });
         }
 
-        public void TestHealthAsync()
-        {
-            TestHealthAsync(() =>
-                {
-                });
-        }
-
-        public void TestHealthAsync(Action callback)
+        public void TestHealthAsync(bool userInitiated, Action callback = null)
         {
             new Thread(() =>
                 {
-                    TestHealth();
+                    TestHealth(userInitiated);
 
                     if (callback != null)
                         callback();
@@ -608,7 +1042,7 @@ namespace SensusService
                 }).Start();
         }
 
-        public void TestHealth()
+        public void TestHealth(bool userInitiated)
         {
             lock (_locker)
             {
@@ -676,57 +1110,79 @@ namespace SensusService
                     }
 
                     foreach (Probe probe in _probes)
-                        if (probe.Enabled && probe.TestHealth(ref error, ref warning, ref misc))
+                        if (probe.Enabled)
                         {
-                            error += "Restarting probe \"" + probe.GetType().FullName + "\"...";
-
-                            try
+                            if (probe.TestHealth(ref error, ref warning, ref misc))
                             {
-                                probe.Restart();
-                            }
-                            catch (Exception ex)
-                            {
-                                error += ex.Message + "...";
-                            }
+                                error += "Restarting probe \"" + probe.GetType().FullName + "\"...";
 
-                            if (!probe.Running)
-                                error += "failed to restart probe \"" + probe.GetType().FullName + "\"." + Environment.NewLine;
+                                try
+                                {
+                                    probe.Restart();
+                                }
+                                catch (Exception ex)
+                                {
+                                    error += ex.Message + "...";
+                                }
+
+                                if (!probe.Running)
+                                    error += "failed to restart probe \"" + probe.GetType().FullName + "\"." + Environment.NewLine;
+                            }
+                            else
+                            {
+                                // keep track of successful system-initiated health tests within the participation horizon. this 
+                                // tells use how consistently the probe is running.
+                                if (!userInitiated)
+                                    lock (probe.SuccessfulHealthTestTimes)
+                                    {
+                                        probe.SuccessfulHealthTestTimes.Add(DateTime.Now);
+                                        probe.SuccessfulHealthTestTimes.RemoveAll(healthTestTime => healthTestTime < ParticipationHorizon);
+                                    }
+                            }
                         }
                 }
 
-                _mostRecentReport = new ProtocolReport(DateTimeOffset.UtcNow, error, warning, misc);
+                #if __ANDROID__
+                Sensus.Android.AndroidSensusServiceHelper serviceHelper = SensusServiceHelper.Get() as Sensus.Android.AndroidSensusServiceHelper;
+                misc += "Wake lock count:  " + serviceHelper.WakeLockAcquisitionCount + Environment.NewLine;
+                #endif
 
+                _mostRecentReport = new ProtocolReportDatum(DateTimeOffset.UtcNow, error, warning, misc, this);
                 SensusServiceHelper.Get().Logger.Log("Protocol report:" + Environment.NewLine + _mostRecentReport, LoggingLevel.Normal, GetType());
 
-                int runningProtocols = SensusServiceHelper.Get().RunningProtocolIds.Count;
-                SensusServiceHelper.Get().UpdateApplicationStatus(runningProtocols + " protocol" + (runningProtocols == 1 ? " is " : "s are") + " running");
+                SensusServiceHelper.Get().Logger.Log("Storing protocol report locally.", LoggingLevel.Normal, GetType());
+                _localDataStore.AddNonProbeDatum(_mostRecentReport);
+
+                if (!_localDataStore.UploadToRemoteDataStore && _forceProtocolReportsToRemoteDataStore)
+                {
+                    SensusServiceHelper.Get().Logger.Log("Local data aren't pushed to remote, so we're copying the report datum directly to the remote cache.", LoggingLevel.Normal, GetType());
+                    _remoteDataStore.AddNonProbeDatum(_mostRecentReport);
+                }
             }
         }
 
-        public void StoreMostRecentProtocolReport()
+        public void ResetForSharing()
         {
-            lock (_locker)
-                if (_mostRecentReport != null)
-                {
-                    SensusServiceHelper.Get().Logger.Log("Storing protocol report locally.", LoggingLevel.Verbose, GetType());
-                    _localDataStore.AddNonProbeDatum(_mostRecentReport);
+            _randomTimeAnchor = DateTime.MinValue;
+            _storageDirectory = null;
+            _mostRecentReport = null;            
 
-                    if (!_localDataStore.UploadToRemoteDataStore && _forceProtocolReportsToRemoteDataStore)
-                    {
-                        SensusServiceHelper.Get().Logger.Log("Local data aren't pushed to remote, so we're copying the report datum directly to the remote cache.", LoggingLevel.Verbose, GetType());
-                        _remoteDataStore.AddNonProbeDatum(_mostRecentReport);
-                    }
-                }
+            foreach (Probe probe in _probes)
+            {
+                probe.ResetForSharing();
+
+                // reset enabled status of probes to the original values. probes can be disabled when the protocol is started (e.g., if the user cancels out of facebook login.)
+                probe.Enabled = probe.OriginallyEnabled;
+            }
+
+            if (_localDataStore != null)
+                _localDataStore.ClearForSharing();
+
+            if (_remoteDataStore != null)
+                _remoteDataStore.ClearForSharing();
         }
 
-        public void StopAsync()
-        {
-            StopAsync(() =>
-                {
-                });
-        }
-
-        public void StopAsync(Action callback)
+        public void StopAsync(Action callback = null)
         {
             new Thread(() =>
                 {
@@ -756,6 +1212,7 @@ namespace SensusService
 
                 foreach (Probe probe in _probes)
                     if (probe.Running)
+                    {
                         try
                         {
                             probe.Stop(); 
@@ -764,6 +1221,7 @@ namespace SensusService
                         {
                             SensusServiceHelper.Get().Logger.Log("Failed to stop " + probe.GetType().FullName + ":  " + ex.Message, LoggingLevel.Normal, GetType());
                         }
+                    }
 
                 if (_localDataStore != null && _localDataStore.Running)
                 {
@@ -790,6 +1248,33 @@ namespace SensusService
                 }
 
                 SensusServiceHelper.Get().Logger.Log("Stopped protocol \"" + _name + "\".", LoggingLevel.Normal, GetType());
+                SensusServiceHelper.Get().FlashNotificationAsync("Stopped \"" + _name + "\".");
+            }
+        }
+
+        public void DeleteAsync(Action callback = null)
+        {
+            new Thread(() =>
+                {
+                    Delete();
+
+                    if (callback != null)
+                        callback();
+            
+                }).Start();
+        }
+
+        public void Delete()
+        {
+            SensusServiceHelper.Get().UnregisterProtocol(this);
+
+            try
+            {
+                Directory.Delete(StorageDirectory, true);
+            }
+            catch (Exception ex)
+            {
+                SensusServiceHelper.Get().Logger.Log("Failed to delete protocol storage directory \"" + StorageDirectory + "\":  " + ex.Message, LoggingLevel.Normal, GetType());
             }
         }
 
@@ -801,6 +1286,11 @@ namespace SensusService
         public override int GetHashCode()
         {
             return _id.GetHashCode();
+        }
+
+        public override string ToString()
+        {
+            return _name;
         }
     }
 }

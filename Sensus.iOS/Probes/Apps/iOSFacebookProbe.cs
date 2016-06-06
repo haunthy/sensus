@@ -24,14 +24,12 @@ using SensusService;
 using SensusService.Exceptions;
 using SensusService.Probes.Apps;
 using Xamarin.Forms;
+using UIKit;
 
 namespace Sensus.iOS.Probes.Apps
 {
     public class iOSFacebookProbe : FacebookProbe
     {
-        private LoginManager _loginManager;
-        private LoginManagerRequestTokenHandler _loginResultHandler;
-
         private bool HasValidAccessToken
         {
             get { return AccessToken.CurrentAccessToken != null && AccessToken.CurrentAccessToken.ExpirationDate.SecondsSinceReferenceDate >= NSDate.Now.SecondsSinceReferenceDate; }
@@ -39,36 +37,82 @@ namespace Sensus.iOS.Probes.Apps
 
         public iOSFacebookProbe()
         {
-            _loginManager = new LoginManager();
-            _loginResultHandler = new LoginManagerRequestTokenHandler((loginResult, error) =>
+        }
+
+        private void ObtainAccessToken(string[] permissionNames)
+        {
+            lock (LoginLocker)
+            {
+                if (HasValidAccessToken)
                 {
-                    if (error == null && loginResult.Token != null)
-                        SensusServiceHelper.Get().Logger.Log("Facebook login succeeded.", SensusService.LoggingLevel.Normal, GetType());
-                    else if (loginResult != null && loginResult.IsCancelled)
-                        SensusServiceHelper.Get().Logger.Log("Facebook login cancelled.", SensusService.LoggingLevel.Normal, GetType());
-                    else
-                        SensusServiceHelper.Get().Logger.Log("Facebook login failed.", SensusService.LoggingLevel.Normal, GetType());
-                });
+                    SensusServiceHelper.Get().Logger.Log("Already have valid Facebook access token. No need to initialize.", LoggingLevel.Normal, GetType());
+                    return;
+                }
+
+                ManualResetEvent loginWait = new ManualResetEvent(false);
+                bool loginCancelled = false;
+                string accessTokenError = null;
+
+                Xamarin.Forms.Device.BeginInvokeOnMainThread(() =>
+                    {
+                        try
+                        {
+                            LoginManagerRequestTokenHandler loginResultHandler = new LoginManagerRequestTokenHandler((loginResult, error) =>
+                                {
+                                    if (error == null && loginResult.Token != null)
+                                    {
+                                        SensusServiceHelper.Get().Logger.Log("Facebook login succeeded.", SensusService.LoggingLevel.Normal, GetType());
+                                        AccessToken.CurrentAccessToken = loginResult.Token;
+                                        loginWait.Set();
+                                    }
+                                    else if (loginResult != null && loginResult.IsCancelled)
+                                    {
+                                        SensusServiceHelper.Get().Logger.Log("Facebook login cancelled.", SensusService.LoggingLevel.Normal, GetType());
+                                        loginCancelled = true;
+                                        loginWait.Set();
+                                    }
+                                    else
+                                    {
+                                        SensusServiceHelper.Get().Logger.Log("Facebook login failed.", SensusService.LoggingLevel.Normal, GetType());
+                                        loginWait.Set();
+                                    }
+                                });
+
+                            new LoginManager().LogInWithReadPermissions(permissionNames, UIApplication.SharedApplication.KeyWindow.RootViewController, loginResultHandler);
+                        }
+                        catch (Exception ex)
+                        {
+                            SensusServiceHelper.Get().Logger.Log("Error while initializing Facebook SDK and/or logging in:  " + ex.Message, LoggingLevel.Normal, GetType());
+                            accessTokenError = ex.Message;
+                            loginWait.Set();
+                        }
+                    });
+
+                loginWait.WaitOne();
+
+                if (accessTokenError != null)
+                    SensusServiceHelper.Get().Logger.Log("Error while initializing Facebook SDK and/or logging in:  " + accessTokenError, LoggingLevel.Normal, GetType());
+
+                if (!HasValidAccessToken)
+                {
+                    string message = "Failed to obtain access token.";
+                    SensusServiceHelper.Get().Logger.Log(message, LoggingLevel.Normal, GetType());
+
+                    // if the user cancelled the login, don't prompt them again
+                    if (loginCancelled)
+                        throw new NotSupportedException(message + " User cancelled login.");
+                // if the user did not cancel the login, allow the login to be presented again when the health test is run
+                else
+                        throw new Exception(message);
+                }
+            }
         }
 
         protected override void Initialize()
         {
             base.Initialize();
 
-            if (HasValidAccessToken)
-            {
-                SensusServiceHelper.Get().Logger.Log("Already have valid Facebook access token. No need to initialize.", LoggingLevel.Normal, GetType());
-                return;
-            }                
-
-            try
-            {
-                _loginManager.LogInWithReadPermissions(GetRequiredPermissionNames(), _loginResultHandler);
-            }
-            catch (Exception ex)
-            {
-                SensusServiceHelper.Get().Logger.Log("Error while initializing Facebook SDK and/or logging in:  " + ex.Message, LoggingLevel.Normal, GetType());
-            }
+            ObtainAccessToken(GetRequiredPermissionNames());
         }
 
         protected override IEnumerable<Datum> Poll(CancellationToken cancellationToken)
@@ -77,16 +121,18 @@ namespace Sensus.iOS.Probes.Apps
 
             if (HasValidAccessToken)
             {
-                // prompt user for any missing permissions
                 string[] missingPermissions = GetRequiredPermissionNames().Where(p => !AccessToken.CurrentAccessToken.Permissions.Contains(p)).ToArray();
                 if (missingPermissions.Length > 0)
-                {
-                    _loginManager.LogInWithReadPermissions(missingPermissions, _loginResultHandler);
-                    return data;
-                }
+                    ObtainAccessToken(missingPermissions);
+            }
+            else
+                ObtainAccessToken(GetRequiredPermissionNames());
 
+            if (HasValidAccessToken)
+            {
                 ManualResetEvent startWait = new ManualResetEvent(false);
                 List<ManualResetEvent> responseWaits = new List<ManualResetEvent>();
+                Exception exception = null;  // can't throw exception from within the UI thread -- it will crash the app. use this variable to check whether an exception did occur.
 
                 Xamarin.Forms.Device.BeginInvokeOnMainThread(() =>
                     {
@@ -128,13 +174,13 @@ namespace Sensus.iOS.Probes.Apps
 
                                                     if (property.PropertyType == typeof(string))
                                                         value = resultDictionary[resultKey].ToString();
-                                                    else if (property.PropertyType == typeof(bool))
+                                                    else if (property.PropertyType == typeof(bool?))
                                                     {
                                                         int parsedBool;
                                                         if (int.TryParse(resultDictionary[resultKey].ToString(), out parsedBool))
                                                             value = parsedBool == 1 ? true : false;
                                                     }
-                                                    else if (property.PropertyType == typeof(DateTimeOffset))
+                                                    else if (property.PropertyType == typeof(DateTimeOffset?))
                                                     {
                                                         DateTimeOffset parsedDateTimeOffset;
                                                         if (DateTimeOffset.TryParse(resultDictionary[resultKey].ToString(), out parsedDateTimeOffset))
@@ -179,7 +225,7 @@ namespace Sensus.iOS.Probes.Apps
                             #endregion
 
                             if (responseWaits.Count == 0)
-                                SensusServiceHelper.Get().Logger.Log("Request connection contained zero requests.", LoggingLevel.Normal, GetType());
+                                exception = new Exception("Request connection contained zero requests.");
                             else
                             {
                                 SensusServiceHelper.Get().Logger.Log("Starting request connection with " + responseWaits.Count + " requests.", LoggingLevel.Normal, GetType());                    
@@ -190,7 +236,7 @@ namespace Sensus.iOS.Probes.Apps
                         }
                         catch (Exception ex)
                         {
-                            SensusServiceHelper.Get().Logger.Log("Error starting request connection:  " + ex.Message, LoggingLevel.Normal, GetType());
+                            exception = new Exception("Error starting request connection:  " + ex.Message);
                         }
                     });
 
@@ -199,13 +245,17 @@ namespace Sensus.iOS.Probes.Apps
                 // wait for all responses to be processed
                 foreach (ManualResetEvent responseWait in responseWaits)
                     responseWait.WaitOne();
+
+                // if any exception occurred when running query, throw it now
+                if (exception != null)
+                    throw exception;
             }
             else
-                SensusServiceHelper.Get().Logger.Log("Attempted to poll Facebook probe without a valid access token.", LoggingLevel.Normal, GetType());
+                throw new Exception("Attempted to poll Facebook probe without a valid access token.");
 
             return data;
         }
-       
+
         public override bool TestHealth(ref string error, ref string warning, ref string misc)
         {
             bool restart = base.TestHealth(ref error, ref warning, ref misc);

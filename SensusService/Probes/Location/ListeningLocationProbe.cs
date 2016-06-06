@@ -13,7 +13,8 @@
 // limitations under the License.
 
 using System;
-using Xamarin.Geolocation;
+using Plugin.Geolocator.Abstractions;
+using Plugin.Permissions.Abstractions;
 
 namespace SensusService.Probes.Location
 {
@@ -21,35 +22,35 @@ namespace SensusService.Probes.Location
     {
         private EventHandler<PositionEventArgs> _positionChangedHandler;
 
-        protected override string DefaultDisplayName
+        public sealed override string DisplayName
         {
-            get { return "Location"; }
+            get { return "GPS Location"; }
         }
 
         public sealed override Type DatumType
         {
             get { return typeof(LocationDatum); }
-        }            
+        }
 
         public ListeningLocationProbe()
         {
             _positionChangedHandler = (o, e) =>
-                {
-                    SensusServiceHelper.Get().Logger.Log("Received position change notification.", LoggingLevel.Verbose, GetType());
+            {
+                SensusServiceHelper.Get().Logger.Log("Received position change notification.", LoggingLevel.Verbose, GetType());
 
-                    StoreDatum(new LocationDatum(e.Position.Timestamp, e.Position.Accuracy, e.Position.Latitude, e.Position.Longitude));
-                };
+                StoreDatum(new LocationDatum(e.Position.Timestamp, e.Position.Accuracy, e.Position.Latitude, e.Position.Longitude));
+            };
         }
 
         protected override void Initialize()
         {
             base.Initialize();
 
-            if (!GpsReceiver.Get().Locator.IsGeolocationEnabled)
+            if (SensusServiceHelper.Get().ObtainPermission(Permission.Location) != PermissionStatus.Granted)
             {
                 // throw standard exception instead of NotSupportedException, since the user might decide to enable GPS in the future
                 // and we'd like the probe to be restarted at that time.
-                string error = "Geolocation is not enabled on this device. Cannot start location probe.";
+                string error = "Geolocation is not permitted on this device. Cannot start location probe.";
                 SensusServiceHelper.Get().FlashNotificationAsync(error);
                 throw new Exception(error);
             }
@@ -57,7 +58,7 @@ namespace SensusService.Probes.Location
 
         protected sealed override void StartListening()
         {
-            GpsReceiver.Get().AddListener(_positionChangedHandler);
+            GpsReceiver.Get().AddListener(_positionChangedHandler, false);
         }
 
         protected sealed override void StopListening()

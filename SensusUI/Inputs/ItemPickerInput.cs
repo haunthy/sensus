@@ -13,128 +13,47 @@
 // limitations under the License.
 
 using System;
-using Xamarin.Forms;
 using SensusUI.UiProperties;
-using System.Collections.Generic;
 
 namespace SensusUI.Inputs
 {
-    public class ItemPickerInput : Input
+    public abstract class ItemPickerInput : Input
     {
-        private string _tipText;
-        private List<string> _items;
-        private Picker _picker;
+        private bool _randomizeItemOrder;
 
-        [EntryStringUiProperty("Tip Text:", true, 10)]
-        public string TipText
+        [OnOffUiProperty("Randomize Item Order:", true, 12)]
+        public bool RandomizeItemOrder
         {
             get
             {
-                return _tipText;
+                return _randomizeItemOrder;
             }
             set
             {
-                _tipText = value;
-            }
-        }
-
-        [EditableListUiProperty(null, true, 11)]
-        public List<string> Items
-        {
-            get
-            {
-                return _items;
-            }
-            // need set method so auto-binding can set the list via the EditableListUiProperty
-            set
-            {
-                _items = value;
-            }
-        }
-
-        public override View View
-        {
-            get
-            {
-                if (base.View == null && _items.Count > 0)
-                {
-                    _picker = new Picker
-                    {
-                        Title = _tipText,
-                        HorizontalOptions = LayoutOptions.FillAndExpand
-                    };
-
-                    foreach (string item in _items)
-                        _picker.Items.Add(item);
-
-                    _picker.SelectedIndexChanged += (o, e) => Complete = Value != null;
-
-                    base.View = new StackLayout
-                    {
-                        Orientation = StackOrientation.Horizontal,
-                        HorizontalOptions = LayoutOptions.FillAndExpand,
-                        Children = { Label, _picker }
-                    };
-                }
-
-                return base.View;
-            }
-        }
-
-        public override object Value
-        {
-            get
-            {
-                return _picker == null || _picker.SelectedIndex < 0 ? null : _picker.Items[_picker.SelectedIndex];
-            }
-        }
-
-        public override bool Enabled
-        {
-            get
-            {
-                return _picker.IsEnabled;
-            }
-            set
-            {
-                _picker.IsEnabled = value;
-            }
-        }
-
-        public override string DefaultName
-        {
-            get
-            {
-                return "Picker";
+                _randomizeItemOrder = value;
             }
         }
 
         public ItemPickerInput()
         {
-            Construct("Please Make Selection", new List<string>());
+            Construct();
         }
 
-        public ItemPickerInput(string labelText, string tipText, List<string> items)
+        public ItemPickerInput(string labelText)
             : base(labelText)
         {
-            Construct(tipText, items);
+            Construct();
         }
 
-        public ItemPickerInput(string name, string labelText, string tipText, List<string> items)
+        public ItemPickerInput(string name, string labelText)
             : base(name, labelText)
         {
-            Construct(tipText, items);      
+            Construct();
         }
 
-        private void Construct(string tipText, List<string> items)
+        private void Construct()
         {
-            _tipText = tipText;
-            _items = items;   
-        }           
-
-        public override string ToString()
-        {
-            return base.ToString() + " -- " + _items.Count + " Items";
+            _randomizeItemOrder = false;
         }
     }
 }

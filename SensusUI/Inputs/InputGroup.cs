@@ -19,6 +19,7 @@ using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using SensusUI.UiProperties;
 using Newtonsoft.Json;
+using SensusService;
 
 namespace SensusUI.Inputs
 {
@@ -27,6 +28,7 @@ namespace SensusUI.Inputs
         private string _id;
         private string _name;
         private ObservableCollection<Input> _inputs;
+        private bool _geotag;
 
         public string Id
         {
@@ -37,6 +39,9 @@ namespace SensusUI.Inputs
             set
             {
                 _id = value;
+
+                foreach (Input input in _inputs)
+                    input.GroupId = _id;
             }
         }
 
@@ -58,20 +63,39 @@ namespace SensusUI.Inputs
             get { return _inputs; }
         }
 
-        [JsonIgnore]
-        public bool Complete
+        [OnOffUiProperty(null, true, 1)]
+        public bool Geotag
         {
-            get { return _inputs.Count == 0 || _inputs.All(i => i == null || i.Complete); }
+            get
+            {
+                return _geotag;
+            }
+            set
+            {
+                _geotag = value;
+            }
+        }
+
+        /// <summary>
+        /// Gets a value indicating whether this <see cref="SensusUI.Inputs.InputGroup"/> is valid. A valid
+        /// input group is one in which each <see cref="SensusUI.Inputs.Input"/> in the group is valid. An
+        /// input group with no inputs is deemed valid by default.
+        /// </summary>
+        /// <value><c>true</c> if valid; otherwise, <c>false</c>.</value>
+        [JsonIgnore]
+        public bool Valid
+        {
+            get { return _inputs.Count == 0 || _inputs.All(input => input == null || input.Valid); }
         }
 
         /// <summary>
         /// For JSON.NET deserialization.
         /// </summary>
-        protected InputGroup()
+        private InputGroup()
         {
             _id = Guid.NewGuid().ToString();
-
             _inputs = new ObservableCollection<Input>();
+            _geotag = false;
 
             _inputs.CollectionChanged += (o, e) =>
             {
@@ -94,6 +118,15 @@ namespace SensusUI.Inputs
             : this(name)
         {
             _inputs.Add(input);
+        }
+
+        public InputGroup Copy()
+        {
+            InputGroup copy = JsonConvert.DeserializeObject<InputGroup>(JsonConvert.SerializeObject(this, SensusServiceHelper.JSON_SERIALIZER_SETTINGS), SensusServiceHelper.JSON_SERIALIZER_SETTINGS);
+
+            copy.Id = Guid.NewGuid().ToString();
+
+            return copy;
         }
 
         public override string ToString()

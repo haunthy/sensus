@@ -12,15 +12,12 @@
     <Compile Include="$(MSBuildThisFileDirectory)App.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)ProbesPage.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)ScriptTriggersPage.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)UiBoundSensusServiceHelper.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)DataStorePage.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)SensusMainPage.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)ProbePage.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)UiProperties\DisplayStringUiProperty.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)UiProperties\DisplayYesNoUiProperty.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)UiProperties\EntryStringUiProperty.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)UiProperties\ListUiProperty.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)UiProperties\IncrementalIntegerUiProperty.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)UiProperties\OnOffUiProperty.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)UiProperties\UiProperty.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)ProtocolPage.cs" />
@@ -37,12 +34,8 @@
     <Compile Include="$(MSBuildThisFileDirectory)ScriptRunnersPage.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)PromptForInputsPage.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Inputs\Input.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)Inputs\ItemPickerInput.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Inputs\LabelOnlyInput.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Inputs\NumberEntryInput.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)Inputs\NumberSliderInput.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)Inputs\TextInput.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)Inputs\YesNoInput.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)MapPage.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)UiProperties\EditorUiProperty.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Inputs\InputGroup.cs" />
@@ -53,6 +46,18 @@
     <Compile Include="$(MSBuildThisFileDirectory)ScriptInputGroupsPage.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)ScriptInputGroupPage.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Inputs\VoiceInput.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)ParticipationReportPage.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)ParticipationReportDetailsPage.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)VerifiedParticipationPage.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Inputs\ItemPickerPageInput.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Inputs\ItemPickerDialogInput.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Inputs\InputValueCondition.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Inputs\InputDisplayCondition.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Inputs\ItemPickerInput.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Inputs\InputCompletionRecord.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Inputs\SliderInput.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Inputs\SingleLineTextInput.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Inputs\MultiLineTextInput.cs" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="$(MSBuildThisFileDirectory)Inputs\" />

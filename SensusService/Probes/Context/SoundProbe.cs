@@ -28,9 +28,9 @@ namespace SensusService.Probes.Context
             set { _sampleLengthMS = value; }
         }
 
-        protected sealed override string DefaultDisplayName
+        public sealed override string DisplayName
         {
-            get { return "Sound"; }
+            get { return "Sound Level"; }
         }
 
         public override int DefaultPollingSleepDurationMS

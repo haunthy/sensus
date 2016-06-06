@@ -13,9 +13,10 @@
 // limitations under the License.
 
 using System;
-using Xamarin.Geolocation;
 using System.Linq;
 using System.Collections.ObjectModel;
+using Plugin.Geolocator.Abstractions;
+using Plugin.Permissions.Abstractions;
 
 namespace SensusService.Probes.Location
 {
@@ -29,9 +30,9 @@ namespace SensusService.Probes.Location
         public ObservableCollection<PointOfInterestProximityTrigger> Triggers
         {
             get { return _triggers; }
-        }            
+        }
 
-        protected override string DefaultDisplayName
+        public sealed override string DisplayName
         {
             get
             {
@@ -82,11 +83,11 @@ namespace SensusService.Probes.Location
         {
             base.Initialize();
 
-            if (!GpsReceiver.Get().Locator.IsGeolocationEnabled)
+            if (SensusServiceHelper.Get().ObtainPermission(Permission.Location) != PermissionStatus.Granted)
             {
                 // throw standard exception instead of NotSupportedException, since the user might decide to enable GPS in the future
                 // and we'd like the probe to be restarted at that time.
-                string error = "Geolocation is not enabled on this device. Cannot start proximity probe.";
+                string error = "Geolocation is not permitted on this device. Cannot start proximity probe.";
                 SensusServiceHelper.Get().FlashNotificationAsync(error);
                 throw new Exception(error);
             }
@@ -94,7 +95,7 @@ namespace SensusService.Probes.Location
 
         protected sealed override void StartListening()
         {
-            GpsReceiver.Get().AddListener(_positionChangedHandler);
+            GpsReceiver.Get().AddListener(_positionChangedHandler, false);
         }
 
         protected sealed override void StopListening()

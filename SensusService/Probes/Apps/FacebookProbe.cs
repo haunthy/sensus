@@ -23,8 +23,21 @@ using SensusService.Anonymization.Anonymizers;
 
 namespace SensusService.Probes.Apps
 {
+    /// <summary>
+    /// Use the following command to generate the debug keyhash:
+    /// 
+    /// keytool -exportcert -keystore /Users/[username]/.local/share/Xamarin/Mono\ for\ Android/debug.keystore -alias androiddebugkey | openssl sha1 -binary | openssl base64
+    /// 
+    /// </summary>
     public abstract class FacebookProbe : PollingProbe
-    {                     
+    {
+        private readonly object _loginLocker = new object();
+
+        protected object LoginLocker
+        {
+            get { return _loginLocker; }
+        }
+
         public sealed override Type DatumType
         {
             get
@@ -33,11 +46,11 @@ namespace SensusService.Probes.Apps
             }
         }
 
-        protected override string DefaultDisplayName
+        public sealed override string DisplayName
         {
             get
             {
-                return "Facebook";
+                return "Facebook Profile";
             }
         }
 
@@ -47,7 +60,15 @@ namespace SensusService.Probes.Apps
             {
                 return 60000 * 60 * 24; // once per day
             }
-        }  
+        }
+
+        protected override void Initialize()
+        {
+            base.Initialize();
+
+            if (GetRequiredPermissionNames().Length == 0)
+                throw new NotSupportedException("No Facebook permissions requested. Will not start Facebook probe.");
+        }
 
         /// <summary>
         /// Gets the required Facebook permissions, as determined by the Facebook probe's configuration and
@@ -72,7 +93,7 @@ namespace SensusService.Probes.Apps
         public string[] GetRequiredPermissionNames()
         {
             return GetRequiredFacebookPermissions().Select(permission => permission.Name).Distinct().ToArray();
-        }   
+        }
 
         public List<Tuple<string, List<string>>> GetEdgeFieldQueries()
         {

@@ -21,12 +21,14 @@ using Xamarin.Forms.Platform.iOS;
 using Xamarin.Forms;
 using SensusUI;
 using SensusService;
-using Xamarin.Geolocation;
-using Toasts.Forms.Plugin.iOS;
 using System.IO;
 using Facebook.CoreKit;
 using Xamarin;
 using Xam.Plugin.MapExtend.iOSUnified;
+using CoreLocation;
+using System.Threading;
+using Plugin.Toasts;
+using SensusService.Probes;
 
 namespace Sensus.iOS
 {
@@ -36,8 +38,6 @@ namespace Sensus.iOS
     [Register("AppDelegate")]
     public partial class AppDelegate : FormsApplicationDelegate
     {
-        private iOSSensusServiceHelper _serviceHelper;
-
         public override bool FinishedLaunching(UIApplication uiApplication, NSDictionary launchOptions)
         {
             SensusServiceHelper.Initialize(() => new iOSSensusServiceHelper());
@@ -50,46 +50,68 @@ namespace Sensus.iOS
             FormsMaps.Init();
             MapExtendRenderer.Init();
 
-            ToastNotificatorImplementation.Init();
+            // toasts for iOS
+            DependencyService.Register<ToastNotificatorImplementation>();
+            ToastNotificatorImplementation.Init(); 
 
-            App app = new App();
-            LoadApplication(app);
+            LoadApplication(new App());
 
             uiApplication.RegisterUserNotificationSettings(UIUserNotificationSettings.GetSettingsForTypes(UIUserNotificationType.Badge | UIUserNotificationType.Sound | UIUserNotificationType.Alert, new NSSet()));
 
-            _serviceHelper = SensusServiceHelper.Get() as iOSSensusServiceHelper;
+            #if UNIT_TESTING
+            Forms.ViewInitialized += (sender, e) =>
+            {
+                if (!string.IsNullOrWhiteSpace(e.View.StyleId))
+                    e.NativeView.AccessibilityIdentifier = e.View.StyleId;
+            };
 
-            UiBoundSensusServiceHelper.Set(_serviceHelper);
-            app.SensusMainPage.DisplayServiceHelper(UiBoundSensusServiceHelper.Get(true));
-
-            if (launchOptions != null)
-            {                
-                NSObject launchOptionValue;
-                if (launchOptions.TryGetValue(UIApplication.LaunchOptionsLocalNotificationKey, out launchOptionValue))
-                    ServiceNotificationAsync(launchOptionValue as UILocalNotification);
-                else if (launchOptions.TryGetValue(UIApplication.LaunchOptionsUrlKey, out launchOptionValue))
-                    Protocol.DisplayFromBytesAsync(File.ReadAllBytes((launchOptionValue as NSUrl).Path));
-            }
-
-            // service all other notifications whose fire time has passed
-            foreach (UILocalNotification notification in uiApplication.ScheduledLocalNotifications)
-                if (notification.FireDate.ToDateTime() <= DateTime.UtcNow)
-                    ServiceNotificationAsync(notification);
+            Calabash.Start();
+            #endif
 
             return base.FinishedLaunching(uiApplication, launchOptions);
         }
 
         public override bool OpenUrl(UIApplication application, NSUrl url, string sourceApplication, NSObject annotation)
         {
-            if (url.AbsoluteString.EndsWith(".sensus"))
-                try
+            if (url != null)
+            {
+                if (url.PathExtension == "json")
                 {
-                    Protocol.DisplayFromBytesAsync(File.ReadAllBytes(url.Path));
+                    if (url.Scheme == "sensus")
+                    {
+                        try
+                        {
+                            Protocol.DeserializeAsync(new Uri("http://" + url.AbsoluteString.Substring(url.AbsoluteString.IndexOf('/') + 2).Trim()), Protocol.DisplayAndStartAsync);
+                        }
+                        catch (Exception ex)
+                        {
+                            SensusServiceHelper.Get().Logger.Log("Failed to display Sensus Protocol from HTTP URL \"" + url.AbsoluteString + "\":  " + ex.Message, LoggingLevel.Verbose, GetType());
+                        }
+                    }
+                    else if (url.Scheme == "sensuss")
+                    {
+                        try
+                        {
+                            Protocol.DeserializeAsync(new Uri("https://" + url.AbsoluteString.Substring(url.AbsoluteString.IndexOf('/') + 2).Trim()), Protocol.DisplayAndStartAsync);
+                        }
+                        catch (Exception ex)
+                        {
+                            SensusServiceHelper.Get().Logger.Log("Failed to display Sensus Protocol from HTTPS URL \"" + url.AbsoluteString + "\":  " + ex.Message, LoggingLevel.Verbose, GetType());
+                        }
+                    }
+                    else
+                    {
+                        try
+                        {
+                            Protocol.DeserializeAsync(File.ReadAllBytes(url.Path), Protocol.DisplayAndStartAsync);
+                        }
+                        catch (Exception ex)
+                        {
+                            SensusServiceHelper.Get().Logger.Log("Failed to display Sensus Protocol from file URL \"" + url.AbsoluteString + "\":  " + ex.Message, LoggingLevel.Verbose, GetType());
+                        }
+                    }
                 }
-                catch (Exception ex)
-                {
-                    SensusServiceHelper.Get().Logger.Log("Failed to display Sensus Protocol from URL \"" + url.AbsoluteString + "\":  " + ex.Message, LoggingLevel.Verbose, GetType());
-                }
+            }
 
             // We need to handle URLs by passing them to their own OpenUrl in order to make the Facebook SSO authentication works.
             return ApplicationDelegate.SharedInstance.OpenUrl(application, url, sourceApplication, annotation);
@@ -101,63 +123,58 @@ namespace Sensus.iOS
             UIApplication.SharedApplication.CancelAllLocalNotifications();
             UIApplication.SharedApplication.ApplicationIconBadgeNumber = 0;
 
-            _serviceHelper.ActivationId = Guid.NewGuid().ToString();
+            iOSSensusServiceHelper serviceHelper = SensusServiceHelper.Get() as iOSSensusServiceHelper;
 
-            iOSSensusServiceHelper sensusServiceHelper = UiBoundSensusServiceHelper.Get(true) as iOSSensusServiceHelper;
+            serviceHelper.ActivationId = Guid.NewGuid().ToString();
 
-            sensusServiceHelper.StartAsync(() =>
+            try
+            {
+                serviceHelper.BarcodeScanner = new ZXing.Mobile.MobileBarcodeScanner(UIApplication.SharedApplication.KeyWindow.RootViewController);
+            }
+            catch (Exception ex)
+            {
+                serviceHelper.Logger.Log("Failed to create barcode scanner:  " + ex.Message, LoggingLevel.Normal, GetType());
+            }
+
+            serviceHelper.StartAsync(() =>
                 {
-                    sensusServiceHelper.UpdateCallbackNotificationActivationIdsAsync();
+                    serviceHelper.UpdateCallbackNotificationActivationIdsAsync();
+
+                    #if UNIT_TESTING
+                    // load and run the unit testing protocol
+                    string filePath = NSBundle.MainBundle.PathForResource("UnitTestingProtocol", "json");
+                    using (Stream file = new FileStream(filePath, FileMode.Open, FileAccess.Read))
+                    {
+                        Protocol.RunUnitTestingProtocol(file);
+                    }
+                    #endif
+
+                    Device.BeginInvokeOnMainThread(() =>
+                        {
+                            (App.Current as App).ProtocolsPage.Bind();
+                        });
                 });
-            
+
+            // background authorization will be done implicitly when the location manager is used in probes, but the authorization is
+            // done asynchronously so it's likely that the probes will believe that GPS is not enabled/authorized even though the user
+            // is about to grant access (if they choose). now, the health test should fix this up by checking for GPS and restarting
+            // the probes, but the whole thing will seem strange to the user. instead, prompt the user for background authorization
+            // immediately. this is only done one time after the app is installed and started.
+            new CLLocationManager().RequestAlwaysAuthorization();
+
             base.OnActivated(uiApplication);
         }
 
         public override void ReceivedLocalNotification(UIApplication application, UILocalNotification notification)
         {
-            ServiceNotificationAsync(notification);
-        }
-
-        private void ServiceNotificationAsync(UILocalNotification notification)
-        {
-            bool isCallback = (notification.UserInfo.ValueForKey(new NSString(SensusServiceHelper.SENSUS_CALLBACK_KEY)) as NSNumber).BoolValue;
-            if (isCallback)
-            {   
-                // cancel notification, since it has served its purpose
-                iOSSensusServiceHelper.CancelLocalNotification(notification);
-
-                string callbackId = (notification.UserInfo.ValueForKey(new NSString(SensusServiceHelper.SENSUS_CALLBACK_ID_KEY)) as NSString).ToString();
-                bool repeating = (notification.UserInfo.ValueForKey(new NSString(SensusServiceHelper.SENSUS_CALLBACK_REPEATING_KEY)) as NSNumber).BoolValue;
-                int repeatDelayMS = (notification.UserInfo.ValueForKey(new NSString(iOSSensusServiceHelper.SENSUS_CALLBACK_REPEAT_DELAY)) as NSNumber).Int32Value;
-                string activationId = (notification.UserInfo.ValueForKey(new NSString(iOSSensusServiceHelper.SENSUS_CALLBACK_ACTIVATION_ID)) as NSString).ToString();
-
-                // only raise callback if it's from the current activation and if it is scheduled
-                if (activationId != _serviceHelper.ActivationId || !iOSSensusServiceHelper.Get().CallbackIsScheduled(callbackId))
-                    return;                      
-
-                nint taskId = UIApplication.SharedApplication.BeginBackgroundTask(() =>
-                    {
-                        // if we're out of time running in the background, cancel the callback.
-                        UiBoundSensusServiceHelper.Get(true).CancelRaisedCallback(callbackId);
-                    });
-
-                UiBoundSensusServiceHelper.Get(true).RaiseCallbackAsync(callbackId, repeating, false, () =>
-                    {
-                        Device.BeginInvokeOnMainThread(() =>
-                            {
-                                // notification has been serviced, so end background task
-                                UIApplication.SharedApplication.EndBackgroundTask(taskId);
-
-                                // update and schedule notification again if it was a repeating callback
-                                if (repeating)
-                                {
-                                    notification.FireDate = DateTime.UtcNow.AddMilliseconds((double)repeatDelayMS).ToNSDate();
-                                    UIApplication.SharedApplication.ScheduleLocalNotification(notification);
-                                }
-                                else
-                                    _serviceHelper.UnscheduleOneTimeCallback(callbackId);
-                            });
-                    });
+            if (notification.UserInfo != null)
+            {
+                NSNumber isCallbackValue = notification.UserInfo.ValueForKey(new NSString(SensusServiceHelper.SENSUS_CALLBACK_KEY)) as NSNumber;
+                if (isCallbackValue != null && isCallbackValue.BoolValue)
+                {
+                    iOSSensusServiceHelper serviceHelper = SensusServiceHelper.Get() as iOSSensusServiceHelper;
+                    serviceHelper.ServiceCallbackNotificationAsync(notification);
+                }
             }
         }
 		
@@ -166,14 +183,24 @@ namespace Sensus.iOS
         // when the user quits.
         public override void DidEnterBackground(UIApplication application)
         {
-            iOSSensusServiceHelper serviceHelper = UiBoundSensusServiceHelper.Get(false) as iOSSensusServiceHelper;
-            if (serviceHelper != null)
-            {
-                serviceHelper.SaveAsync();
+            iOSSensusServiceHelper serviceHelper = SensusServiceHelper.Get() as iOSSensusServiceHelper;
 
-                // app is no longer active, so reset the activation ID
-                serviceHelper.ActivationId = null;
-            }
+            // app is no longer active, so reset the activation ID
+            serviceHelper.ActivationId = null;
+
+            // leave the user a notification if a prompt is currently running
+            if (iOSSensusServiceHelper.PromptForInputsRunning)
+                serviceHelper.IssueNotificationAsync("Please open to provide responses.", null);
+                
+            // save app state in background
+            nint saveTaskId = application.BeginBackgroundTask(() =>
+                {
+                });
+
+            serviceHelper.SaveAsync(() =>
+                {
+                    application.EndBackgroundTask(saveTaskId);
+                }); 
         }
 		
         // This method is called as part of the transiton from background to active state.
@@ -184,7 +211,33 @@ namespace Sensus.iOS
         // This method is called when the application is about to terminate. Save data, if needed.
         public override void WillTerminate(UIApplication application)
         {
-            _serviceHelper.Dispose();
-        }                
+            // this method won't be called when the user kills the app using multitasking; however,
+            // it should be called if the system kills the app when it's running in the background.
+            // it should also be called if the system shuts down due to loss of battery power.
+            // there doesn't appear to be a way to gracefully stop the app when the user kills it
+            // via multitasking...we'll have to live with that. also some online resources indicate 
+            // that no background time can be requested from within this method. so, instead of 
+            // beginning a background task, just wait for the calls to finish.
+
+            SensusServiceHelper serviceHelper = SensusServiceHelper.Get();
+
+            // we're going to save the service helper and its protocols/probes in the running state
+            // so that they will be restarted if/when the user restarts the app. in order to properly 
+            // track running time for listening probes, we need to add a stop time manually since
+            // we won't call stop until after the service helper has been saved.
+            foreach (Protocol protocol in serviceHelper.RegisteredProtocols)
+                if (protocol.Running)
+                    foreach (Probe probe in protocol.Probes)
+                        if (probe.Running)
+                        {
+                            lock (probe.StartStopTimes)
+                            {
+                                probe.StartStopTimes.Add(new Tuple<bool, DateTime>(false, DateTime.Now));
+                            }
+                        }
+
+            serviceHelper.Save();
+            serviceHelper.Stop();
+        }
     }
 }

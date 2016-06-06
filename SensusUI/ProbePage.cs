@@ -49,6 +49,25 @@ namespace SensusUI
                 VerticalOptions = LayoutOptions.FillAndExpand
             };
 
+            string type = "";
+            if (probe is ListeningProbe)
+                type = "Listening";
+            else if (probe is PollingProbe)
+                type = "Polling";
+
+            contentLayout.Children.Add(new ContentView
+                {
+                    Content = new Label
+                    { 
+                        Text = probe.DisplayName + (type == "" ? "" : " (" + type + ")"),
+                        FontSize = 20, 
+                        FontAttributes = FontAttributes.Italic,
+                        TextColor = Color.Accent,
+                        HorizontalOptions = LayoutOptions.Center 
+                    },
+                    Padding = new Thickness(0, 10, 0, 10)
+                });
+
             foreach (StackLayout stack in UiProperty.GetPropertyStacks(probe))
                 contentLayout.Children.Add(stack);
 
@@ -80,15 +99,14 @@ namespace SensusUI
 
                 shareScriptButton.Clicked += (o, e) =>
                 {
-                    string sharePath = UiBoundSensusServiceHelper.Get(true).GetSharePath(".json");
+                    string sharePath = SensusServiceHelper.Get().GetSharePath(".json");
 
                     using (StreamWriter shareFile = new StreamWriter(sharePath))
                     {
                         shareFile.WriteLine(JsonConvert.SerializeObject(probe, SensusServiceHelper.JSON_SERIALIZER_SETTINGS));
-                        shareFile.Close();
                     }
 
-                    UiBoundSensusServiceHelper.Get(true).ShareFileAsync(sharePath, "Probe Definition");
+                    SensusServiceHelper.Get().ShareFileAsync(sharePath, "Probe Definition", "application/json");
                 };
             }
             #endregion

@@ -14,19 +14,22 @@
 
 using System;
 using System.Collections.ObjectModel;
+using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
 
 namespace SensusService.Probes.User
 {
     public class ScriptProbe : Probe
-    {        
+    {
         private ObservableCollection<ScriptRunner> _scriptRunners;
 
         public ObservableCollection<ScriptRunner> ScriptRunners
         {
             get { return _scriptRunners; }
-        }            
+        }
 
-        protected override string DefaultDisplayName
+        public sealed override string DisplayName
         {
             get { return "Scripted Interactions"; }
         }
@@ -34,6 +37,59 @@ namespace SensusService.Probes.User
         public sealed override Type DatumType
         {
             get { return typeof(ScriptDatum); }
+        }
+
+        protected override float RawParticipation
+        {
+            get
+            {
+                int scriptsRun = _scriptRunners.Sum(scriptRunner => scriptRunner.RunTimes.Count(runTime => runTime >= Protocol.ParticipationHorizon));
+                int scriptsCompleted = _scriptRunners.Sum(scriptRunner => scriptRunner.CompletionTimes.Count(completionTime => completionTime >= Protocol.ParticipationHorizon));
+                return scriptsRun == 0 ? 1 : scriptsCompleted / (float)scriptsRun;
+            }
+        }
+
+        public override string CollectionDescription
+        {
+            get
+            {
+                StringBuilder collectionDescription = new StringBuilder();
+
+                Regex uppercaseSplitter = new Regex(@"
+                (?<=[A-Z])(?=[A-Z][a-z]) |
+                (?<=[^A-Z])(?=[A-Z]) |
+                (?<=[A-Za-z])(?=[^A-Za-z])", RegexOptions.IgnorePatternWhitespace);
+
+                foreach (ScriptRunner scriptRunner in _scriptRunners)
+                    if (scriptRunner.Enabled)
+                    {
+                        foreach (Trigger trigger in scriptRunner.Triggers)
+                            collectionDescription.Append((collectionDescription.Length == 0 ? "" : Environment.NewLine) + scriptRunner.Name + ":  When " + trigger.Probe.DisplayName + " is " + uppercaseSplitter.Replace(trigger.Condition.ToString(), " ").ToLower() + " " + trigger.ConditionValue + ".");
+
+                        if (scriptRunner.RunOnStart)
+                            collectionDescription.Append((collectionDescription.Length == 0 ? "" : Environment.NewLine) + scriptRunner.Name + ":  Once when the study is started.");
+
+                        if (scriptRunner.RandomTriggerWindows != "")
+                        {
+                            string windows = scriptRunner.RandomTriggerWindows;
+                            string collectionDescriptionPrefix = "Randomly during hours ";
+                            int commaCount = windows.Count(c => c == ',');
+                            if (commaCount == 0)
+                            {
+                                if (!windows.Contains('-'))
+                                    collectionDescriptionPrefix = "At ";
+                            }
+                            else if (commaCount == 1)
+                                windows = windows.Replace(",", " and");
+                            else if (commaCount > 1)
+                                windows = windows.Insert(windows.LastIndexOf(',') + 1, " and");
+
+                            collectionDescription.Append((collectionDescription.Length == 0 ? "" : Environment.NewLine) + scriptRunner.Name + ":  " + collectionDescriptionPrefix + windows + ".");
+                        }
+                    }
+
+                return collectionDescription.ToString();
+            }
         }
 
         public ScriptProbe()
@@ -46,15 +102,17 @@ namespace SensusService.Probes.User
             base.Initialize();
 
             foreach (ScriptRunner scriptRunner in _scriptRunners)
-                scriptRunner.Initialize();
+                if (scriptRunner.Enabled)
+                    scriptRunner.Initialize();
         }
 
-        public override void Start()
+        protected override void InternalStart()
         {
-            base.Start();
+            base.InternalStart();
 
             foreach (ScriptRunner scriptRunner in _scriptRunners)
-                scriptRunner.Start();            
+                if (scriptRunner.Enabled)
+                    scriptRunner.Start();            
         }
 
         public override bool TestHealth(ref string error, ref string warning, ref string misc)
@@ -64,7 +122,7 @@ namespace SensusService.Probes.User
             if (Running)
             {
                 foreach (ScriptRunner scriptRunner in _scriptRunners)
-                    if (scriptRunner.TestHealth(ref error, ref warning, ref misc))
+                    if (scriptRunner.Enabled && scriptRunner.TestHealth(ref error, ref warning, ref misc))
                     {
                         warning += "Restarting script runner \"" + scriptRunner.Name + "\"." + Environment.NewLine;
 
@@ -81,7 +139,15 @@ namespace SensusService.Probes.User
             }
 
             return restart;
-        }                               
+        }
+
+        public override void ResetForSharing()
+        {
+            base.ResetForSharing();
+
+            foreach (ScriptRunner scriptRunner in _scriptRunners)
+                scriptRunner.ClearForSharing();
+        }
 
         public override void Stop()
         {
