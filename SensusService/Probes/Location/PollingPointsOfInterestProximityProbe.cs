@@ -16,24 +16,24 @@ using System;
 using SensusService.Probes;
 using System.Collections.Generic;
 using SensusUI.UiProperties;
-using Xamarin.Geolocation;
 using SensusService.Probes.Location;
 using System.Threading;
 using System.Collections.ObjectModel;
 using System.Linq;
+using Plugin.Geolocator.Abstractions;
 
 namespace SensusService.Probes.Location
 {
     public class PollingPointsOfInterestProximityProbe : PollingProbe, IPointsOfInterestProximityProbe
-    {        
+    {
         private ObservableCollection<PointOfInterestProximityTrigger> _triggers;
 
         public ObservableCollection<PointOfInterestProximityTrigger> Triggers
         {
             get { return _triggers; }
-        }  
+        }
 
-        protected override string DefaultDisplayName
+        public sealed override string DisplayName
         {
             get
             {
@@ -55,7 +55,7 @@ namespace SensusService.Probes.Location
             {
                 return 30000; // every 30 seconds
             }
-        }            
+        }
 
         public PollingPointsOfInterestProximityProbe()
         {
@@ -68,7 +68,9 @@ namespace SensusService.Probes.Location
 
             Position currentPosition = GpsReceiver.Get().GetReading(cancellationToken);
 
-            if (currentPosition != null)
+            if (currentPosition == null)
+                throw new Exception("Failed to get GPS reading.");
+            else
                 foreach (PointOfInterest pointOfInterest in SensusServiceHelper.Get().PointsOfInterest.Union(Protocol.PointsOfInterest))  // POIs are stored on the service helper (e.g., home locations) and the Protocol (e.g., bars), since the former are user-specific and the latter are universal.
                 {
                     double distanceToPointOfInterestMeters = pointOfInterest.KmDistanceTo(currentPosition) * 1000;

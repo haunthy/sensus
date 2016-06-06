@@ -15,6 +15,7 @@
 using SensusService.Exceptions;
 using System;
 using Xamarin.Forms;
+using System.Reflection;
 
 namespace SensusUI.UiProperties
 {
@@ -35,13 +36,25 @@ namespace SensusUI.UiProperties
 
             public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
             {
-                throw new SensusException("Invalid call to " + GetType().FullName + ".ConvertBack.");
+                new SensusException("Invalid call to " + GetType().FullName + ".ConvertBack.");
+                return null;
             }
         }
 
         public DisplayStringUiProperty(string labelText, int order)
-            : base(labelText, false, order)
+            : base(labelText, true, order)
         {
+        }
+
+        public override View GetView(PropertyInfo property, object o, out BindableProperty targetProperty, out IValueConverter converter)
+        {
+            targetProperty = Label.TextProperty;
+            converter = new ValueConverter();
+
+            return new Label
+            {
+                FontSize = 20
+            };
         }
     }
 }

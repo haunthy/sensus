@@ -14,8 +14,9 @@
 
 using System;
 using SensusService.Probes.Location;
-using Xamarin.Geolocation;
 using SensusService;
+using Plugin.Geolocator.Abstractions;
+using Plugin.Permissions.Abstractions;
 
 namespace Sensus.iOS.Probes.Location
 {
@@ -36,11 +37,11 @@ namespace Sensus.iOS.Probes.Location
         {
             base.Initialize();
 
-            if (!GpsReceiver.Get().Locator.IsGeolocationEnabled || !GpsReceiver.Get().Locator.SupportsHeading)
+            if (SensusServiceHelper.Get().ObtainPermission(Permission.Location) != PermissionStatus.Granted)
             {
                 // throw standard exception instead of NotSupportedException, since the user might decide to enable GPS in the future
                 // and we'd like the probe to be restarted at that time.
-                string error = "Geolocation / heading are not enabled on this device. Cannot start compass probe.";
+                string error = "Geolocation / heading are not permitted on this device. Cannot start compass probe.";
                 SensusServiceHelper.Get().FlashNotificationAsync(error);
                 throw new Exception(error);
             }
@@ -48,7 +49,7 @@ namespace Sensus.iOS.Probes.Location
 
         protected sealed override void StartListening()
         {
-            GpsReceiver.Get().AddListener(_positionChangedHandler);
+            GpsReceiver.Get().AddListener(_positionChangedHandler, true);
         }
 
         protected sealed override void StopListening()

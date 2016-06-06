@@ -28,28 +28,32 @@ using Android.Widget;
 using Newtonsoft.Json;
 using SensusService;
 using Xamarin;
-using Xamarin.Geolocation;
 using SensusService.Probes.Location;
 using SensusService.Probes;
 using SensusService.Probes.Movement;
+using System.Linq;
+using ZXing.Mobile;
+using Android.Graphics;
+using Android.Media;
+using System.Threading.Tasks;
+using Plugin.Permissions.Abstractions;
+using SensusService.Exceptions;
 
 namespace Sensus.Android
 {
     public class AndroidSensusServiceHelper : SensusServiceHelper
     {
-        public const string MAIN_ACTIVITY_WILL_BE_SET = "MAIN-ACTIVITY-WILL-BE-SET";
-        private const string SERVICE_NOTIFICATION_TAG = "SENSUS-SERVICE-NOTIFICATION";
-
         private AndroidSensusService _service;
         private ConnectivityManager _connectivityManager;
         private NotificationManager _notificationManager;
         private string _deviceId;
-        private AndroidMainActivity _mainActivity;
-        private ManualResetEvent _mainActivityWait;
-        private readonly object _getMainActivityLocker = new object();
+        private AndroidMainActivity _focusedMainActivity;
+        private readonly object _focusedMainActivityLocker = new object();
         private AndroidTextToSpeech _textToSpeech;
         private PowerManager.WakeLock _wakeLock;
-        private bool _mainActivityWillBeSet;
+        private int _wakeLockAcquisitionCount;
+        private List<Action<AndroidMainActivity>> _actionsToRunUsingMainActivity;
+        private Dictionary<string, PendingIntent> _callbackIdPendingIntent;
 
         [JsonIgnore]
         public AndroidSensusService Service
@@ -64,7 +68,21 @@ namespace Sensus.Android
 
         public override bool WiFiConnected
         {
-            get { return _connectivityManager.GetNetworkInfo(ConnectivityType.Wifi).IsConnected; }
+            get
+            {
+                // https://github.com/predictive-technology-laboratory/sensus/wiki/Backwards-Compatibility
+                #if __ANDROID_23__
+                if (Build.VERSION.SdkInt >= BuildVersionCodes.M)
+                    return _connectivityManager.GetAllNetworks().Select(network => _connectivityManager.GetNetworkInfo(network)).Any(networkInfo => networkInfo.Type == ConnectivityType.Wifi && networkInfo.IsConnected);  // API level 23
+                else
+                #endif
+                {
+                    // ignore deprecation warning
+                    #pragma warning disable 618
+                    return _connectivityManager.GetNetworkInfo(ConnectivityType.Wifi).IsConnected;
+                    #pragma warning restore 618
+                }
+            }
         }
 
         public override bool IsCharging
@@ -85,102 +103,156 @@ namespace Sensus.Android
             }
         }
 
-        protected override Geolocator Geolocator
+        protected override bool IsOnMainThread
         {
             get
             {
-                return new Geolocator(Application.Context);
+                // we should always have a service. if we do not, assume the worst -- that we're on the main thread. this will hopefully
+                // produce an error report back at xamarin insights.
+                if (_service == null)
+                    return true;
+                // if we have a service, compare the current thread's looper to the main thread's looper
+                else
+                    return Looper.MyLooper() == _service.MainLooper;
             }
         }
 
-        public bool MainActivityWillBeSet
+        [JsonIgnore]
+        public int WakeLockAcquisitionCount
         {
-            get
-            {
-                return _mainActivityWillBeSet;
-            }
-            set
-            {
-                _mainActivityWillBeSet = value;
-            }
+            get { return _wakeLockAcquisitionCount; }
         }
 
         public AndroidSensusServiceHelper()
         {
-            _mainActivityWait = new ManualResetEvent(false);   
+            _actionsToRunUsingMainActivity = new List<Action<AndroidMainActivity>>();
+            _callbackIdPendingIntent = new Dictionary<string, PendingIntent>();
         }
 
         public void SetService(AndroidSensusService service)
-        {
+        {            
             _service = service;
-            _connectivityManager = _service.GetSystemService(Context.ConnectivityService) as ConnectivityManager;
-            _notificationManager = _service.GetSystemService(Context.NotificationService) as NotificationManager;
-            _deviceId = Settings.Secure.GetString(_service.ContentResolver, Settings.Secure.AndroidId);
-            _textToSpeech = new AndroidTextToSpeech(_service);
-            _wakeLock = (_service.GetSystemService(Context.PowerService) as PowerManager).NewWakeLock(WakeLockFlags.Partial, "SENSUS");  
+
+            if (_service == null)
+            {
+                if (_connectivityManager != null)
+                    _connectivityManager.Dispose();
+
+                if (_notificationManager != null)
+                    _notificationManager.Dispose();
+
+                if (_textToSpeech != null)
+                    _textToSpeech.Dispose();
+
+                if (_wakeLock != null)
+                    _wakeLock.Dispose();
+            }
+            else
+            {
+                _connectivityManager = _service.GetSystemService(Context.ConnectivityService) as ConnectivityManager;
+                _notificationManager = _service.GetSystemService(Context.NotificationService) as NotificationManager;
+                _textToSpeech = new AndroidTextToSpeech(_service);
+                _wakeLock = (_service.GetSystemService(Context.PowerService) as PowerManager).NewWakeLock(WakeLockFlags.Partial, "SENSUS");  
+                _wakeLockAcquisitionCount = 0;
+                _deviceId = Settings.Secure.GetString(_service.ContentResolver, Settings.Secure.AndroidId);
+
+                // must initialize after _deviceId is set
+                if (Insights.IsInitialized)
+                    Insights.Identify(_deviceId, "Device ID", _deviceId);
+            }
         }
 
-        public void GetMainActivityAsync(bool foreground, Action<AndroidMainActivity> callback)
+        #region main activity
+
+        /// <summary>
+        /// Runs an action using main activity, optionally bringing the main activity into focus if it is not already focused.
+        /// </summary>
+        /// <param name="action">Action to run.</param>
+        /// <param name="startMainActivityIfNotFocused">Whether or not to start the main activity if it is not currently focused.</param>
+        /// <param name="holdActionIfNoActivity">If the main activity is not focused and we're not starting a new one to refocus it, whether 
+        /// or not to hold the action for later when the activity is refocused.</param>
+        public void RunActionUsingMainActivityAsync(Action<AndroidMainActivity> action, bool startMainActivityIfNotFocused, bool holdActionIfNoActivity)
         {
             // this must be done asynchronously because it blocks waiting for the activity to start. calling this method from the UI would create deadlocks.
             new Thread(() =>
                 {
-                    lock (_getMainActivityLocker)
+                    lock (_focusedMainActivityLocker)
                     {
-                        if (_mainActivity == null || (foreground && !_mainActivity.IsForegrounded))
-                        {                            
-                            Logger.Log("Main activity is not started or is not in the foreground.", LoggingLevel.Normal, GetType());
-
-                            if (_mainActivityWillBeSet)
-                                Logger.Log("Main activity is about to be set. Will wait for it.", LoggingLevel.Normal, GetType());
-                            else
+                        // run actions now only if the main activity is focused. this is a stronger requirement than merely started/resumed since it
+                        // implies that the user interface is up. this is important because if certain actions (e.g., speech recognition) are run
+                        // after the activity is resumed but before the window is up, the appearance of the activity's window can hide/cancel the
+                        // action's window.
+                        if (_focusedMainActivity == null)
+                        {           
+                            if (startMainActivityIfNotFocused)
                             {
-                                Logger.Log("Starting main activity.", LoggingLevel.Normal, GetType());
+                                // we'll run the action when the activity is focused
+                                lock (_actionsToRunUsingMainActivity)
+                                    _actionsToRunUsingMainActivity.Add(action);
+                                
+                                Logger.Log("Starting main activity to run action.", LoggingLevel.Normal, GetType());
 
-                                _mainActivityWait.Reset();
-
-                                // start the activity and wait for it to bind itself to the service
+                                // start the activity. when it starts, it will call back to SetFocusedMainActivity indicating readiness. once 
+                                // this happens, we'll be ready to run the action that was just passed in as well as any others that need to be run.
                                 Intent intent = new Intent(_service, typeof(AndroidMainActivity));
-                                intent.AddFlags(ActivityFlags.FromBackground | ActivityFlags.NewTask | ActivityFlags.ClearTask);
+                                intent.AddFlags(ActivityFlags.FromBackground | ActivityFlags.NewTask);
                                 _service.StartActivity(intent);
                             }
-
-                            // wait for main activity to be set
-                            _mainActivityWait.WaitOne();
-
-                            // wait for the UI to come up -- we don't want it to come up later and hide anything
-                            _mainActivity.UiReadyWait.WaitOne();
-                            Logger.Log("UI is ready.", LoggingLevel.Normal, GetType());
+                            else if (holdActionIfNoActivity)
+                            {
+                                // we'll run the action the next time the activity is focused
+                                lock (_actionsToRunUsingMainActivity)
+                                    _actionsToRunUsingMainActivity.Add(action);
+                            }
                         }
-
-                        if (_mainActivity == null)
+                        else
                         {
-                            string errorMessage = "Failed to get main activity.";
-                            Logger.Log(errorMessage + " Stacktrace:  " + System.Environment.StackTrace, LoggingLevel.Normal, GetType());
-                            Insights.Report(new Exception(errorMessage), Insights.Severity.Error);
+                            // we'll run the action now
+                            lock (_actionsToRunUsingMainActivity)
+                                _actionsToRunUsingMainActivity.Add(action);
+                            
+                            RunActionsUsingMainActivity();
                         }
-                        
-                        callback(_mainActivity);
                     }
 
                 }).Start();
         }
 
-        public void SetMainActivity(AndroidMainActivity value)
+        public void SetFocusedMainActivity(AndroidMainActivity focusedMainActivity)
         {
-            _mainActivity = value;
+            lock (_focusedMainActivityLocker)
+            {
+                _focusedMainActivity = focusedMainActivity;
 
-            if (_mainActivity == null)
-            {
-                _mainActivityWait.Reset();
-                Logger.Log("Main activity has been unset.", LoggingLevel.Normal, GetType());
-            }
-            else
-            {
-                _mainActivityWait.Set();
-                Logger.Log("Main activity has been set.", LoggingLevel.Normal, GetType());
+                if (_focusedMainActivity == null)
+                    Logger.Log("Main activity not focused.", LoggingLevel.Normal, GetType());
+                else
+                {
+                    Logger.Log("Main activity focused.", LoggingLevel.Normal, GetType());
+                    RunActionsUsingMainActivity();
+                }
             }
         }
+
+        private void RunActionsUsingMainActivity()
+        {
+            lock (_focusedMainActivityLocker)
+            {
+                lock (_actionsToRunUsingMainActivity)
+                {
+                    Logger.Log("Running " + _actionsToRunUsingMainActivity.Count + " actions using main activity.", LoggingLevel.Debug, GetType());
+
+                    foreach (Action<AndroidMainActivity> action in _actionsToRunUsingMainActivity)
+                        action(_focusedMainActivity);
+
+                    _actionsToRunUsingMainActivity.Clear();
+                }
+            }
+        }
+
+        #endregion
+
+        #region miscellaneous platform-specific functions
 
         protected override void InitializeXamarinInsights()
         {
@@ -197,29 +269,25 @@ namespace Sensus.Android
                         intent.SetType("*/*");
                         intent.AddCategory(Intent.CategoryOpenable);
 
-                        GetMainActivityAsync(true, mainActivity =>
+                        RunActionUsingMainActivityAsync(mainActivity =>
                             {
-                                if (mainActivity == null)
-                                    callback(null);
-                                else
-                                    mainActivity.GetActivityResultAsync(intent, AndroidActivityResultRequestCode.PromptForFile, result =>
-                                        {
-                                            if (result != null && result.Item1 == Result.Ok)
-                                                try
+                                mainActivity.GetActivityResultAsync(intent, AndroidActivityResultRequestCode.PromptForFile, result =>
+                                    {
+                                        if (result != null && result.Item1 == Result.Ok)
+                                            try
+                                            {
+                                                using (StreamReader file = new StreamReader(_service.ContentResolver.OpenInputStream(result.Item2.Data)))
                                                 {
-                                                    using (StreamReader file = new StreamReader(_service.ContentResolver.OpenInputStream(result.Item2.Data)))
-                                                    {
-                                                        string content = file.ReadToEnd();
-                                                        file.Close();
-                                                        callback(content);
-                                                    }
+                                                    callback(file.ReadToEnd());
                                                 }
-                                                catch (Exception ex)
-                                                {
-                                                    FlashNotificationAsync("Error reading text file:  " + ex.Message);
-                                                }
-                                        });
-                            });
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                FlashNotificationAsync("Error reading text file:  " + ex.Message);
+                                            }
+                                    });
+                                
+                            }, true, false);
                     }
                     catch (ActivityNotFoundException)
                     {
@@ -233,14 +301,14 @@ namespace Sensus.Android
                 }).Start();
         }
 
-        public override void ShareFileAsync(string path, string subject)
+        public override void ShareFileAsync(string path, string subject, string mimeType)
         {
             new Thread(() =>
                 {
                     try
                     {
                         Intent intent = new Intent(Intent.ActionSend);
-                        intent.SetType("text/plain");
+                        intent.SetType(mimeType);
                         intent.AddFlags(ActivityFlags.GrantReadUriPermission);
 
                         if (!string.IsNullOrWhiteSpace(subject))
@@ -251,11 +319,11 @@ namespace Sensus.Android
                         intent.PutExtra(Intent.ExtraStream, uri);
 
                         // run from main activity to get a smoother transition back to sensus
-                        GetMainActivityAsync(true, mainActivity =>
+                        RunActionUsingMainActivityAsync(mainActivity =>
                             {
-                                if (mainActivity != null)
-                                    mainActivity.StartActivity(intent);
-                            });
+                                mainActivity.StartActivity(intent);
+                                
+                            }, true, false);
                     }
                     catch (Exception ex)
                     {
@@ -265,121 +333,122 @@ namespace Sensus.Android
                 }).Start();
         }
 
+        public override void SendEmailAsync(string toAddress, string subject, string message)
+        {
+            RunActionUsingMainActivityAsync(mainActivity =>
+                {
+                    Intent emailIntent = new Intent(Intent.ActionSend);
+                    emailIntent.PutExtra(Intent.ExtraEmail, new string[] { toAddress });
+                    emailIntent.PutExtra(Intent.ExtraSubject, subject);
+                    emailIntent.PutExtra(Intent.ExtraText, message);
+                    emailIntent.SetType("text/plain");
+
+                    mainActivity.StartActivity(emailIntent);
+
+                }, true, false);
+        }
+
         public override void TextToSpeechAsync(string text, Action callback)
         {
             _textToSpeech.SpeakAsync(text, callback);
         }
 
-        public override void RunVoicePromptAsync(string prompt, Action<string> callback)
+        public override void RunVoicePromptAsync(string prompt, Action postDisplayCallback, Action<string> callback)
         {
             new Thread(() =>
                 {
                     string input = null;
                     ManualResetEvent dialogDismissWait = new ManualResetEvent(false);
 
-                    GetMainActivityAsync(true, mainActivity =>
+                    RunActionUsingMainActivityAsync(mainActivity =>
                         {
-                            if (mainActivity != null)
-                                mainActivity.RunOnUiThread(() =>
-                                    {   
-                                        #region set up dialog
+                            mainActivity.RunOnUiThread(() =>
+                                {   
+                                    #region set up dialog
+                                    TextView promptView = new TextView(mainActivity) { Text = prompt, TextSize = 20 };
+                                    EditText inputEdit = new EditText(mainActivity) { TextSize = 20 };
+                                    LinearLayout scrollLayout = new LinearLayout(mainActivity){ Orientation = global::Android.Widget.Orientation.Vertical };
+                                    scrollLayout.AddView(promptView);                                
+                                    scrollLayout.AddView(inputEdit);
+                                    ScrollView scrollView = new ScrollView(mainActivity);
+                                    scrollView.AddView(scrollLayout);
 
-                                        TextView promptView = new TextView(mainActivity) { Text = prompt, TextSize = 20 };
-                                        EditText inputEdit = new EditText(mainActivity) { TextSize = 20 };
-                                        LinearLayout scrollLayout = new LinearLayout(mainActivity){ Orientation = Orientation.Vertical };
-                                        scrollLayout.AddView(promptView);                                
-                                        scrollLayout.AddView(inputEdit);
-                                        ScrollView scrollView = new ScrollView(mainActivity);
-                                        scrollView.AddView(scrollLayout);
-
-                                        AlertDialog dialog = new AlertDialog.Builder(mainActivity)
-                                                 .SetTitle("Sensus is requesting input...")
-                                                 .SetView(scrollView)
-                                                 .SetPositiveButton("OK", (o, e) =>
-                                            {
-                                                input = inputEdit.Text;
-                                            })
-                                                 .SetNegativeButton("Cancel", (o, e) =>
-                                            {
-                                            })
-                                                 .Create();                                                               
-
-                                        // for some reason, stopping the activity with the home button doesn't raise the alert dialog's dismiss 
-                                        // event. so, we'll manually trap the activity stop and dismiss the dialog ourselves. this is important
-                                        // because the caller of this method might be blocking itself or others (e.g., other prompts) until
-                                        // the dialog is dismissed. if we don't trap the activity stop then those blocks could go on indefinitely.
-                                        EventHandler activityStoppedHandler = (o, e) =>
+                                    AlertDialog dialog = new AlertDialog.Builder(mainActivity)
+                                        .SetTitle("Sensus is requesting input...")
+                                        .SetView(scrollView)
+                                        .SetPositiveButton("OK", (o, e) =>
                                         {
-                                            dialog.Dismiss();
-                                        };                            
-
-                                        mainActivity.Stopped += activityStoppedHandler;
-
-                                        dialog.DismissEvent += (o, e) =>
+                                            input = inputEdit.Text;
+                                        })
+                                        .SetNegativeButton("Cancel", (o, e) =>
                                         {
-                                            // we don't need the dismiss event anymore, since the dialog has closed
-                                            mainActivity.Stopped -= activityStoppedHandler;
+                                        })
+                                        .Create();                                                               
 
-                                            dialogDismissWait.Set();
-                                        };                                    
+                                    dialog.DismissEvent += (o, e) =>
+                                    {
+                                        dialogDismissWait.Set();
+                                    };   
 
-                                        ManualResetEvent dialogShowWait = new ManualResetEvent(false);
+                                    ManualResetEvent dialogShowWait = new ManualResetEvent(false);
 
-                                        dialog.ShowEvent += (o, e) =>
-                                        {                                    
-                                            dialogShowWait.Set();
-                                        };
+                                    dialog.ShowEvent += (o, e) =>
+                                    {                                    
+                                        dialogShowWait.Set();
 
-                                        // dismiss the keyguard when dialog appears
-                                        dialog.Window.AddFlags(global::Android.Views.WindowManagerFlags.DismissKeyguard);
-                                        dialog.Window.AddFlags(global::Android.Views.WindowManagerFlags.ShowWhenLocked);
-                                        dialog.Window.AddFlags(global::Android.Views.WindowManagerFlags.TurnScreenOn);
-                                        dialog.Window.SetSoftInputMode(global::Android.Views.SoftInput.AdjustResize | global::Android.Views.SoftInput.StateAlwaysHidden);
+                                        if (postDisplayCallback != null)
+                                            postDisplayCallback();
+                                    };
 
-                                        // dim whatever is behind the dialog
-                                        dialog.Window.AddFlags(global::Android.Views.WindowManagerFlags.DimBehind);
-                                        dialog.Window.Attributes.DimAmount = 0.75f;
+                                    // dismiss the keyguard when dialog appears
+                                    dialog.Window.AddFlags(global::Android.Views.WindowManagerFlags.DismissKeyguard);
+                                    dialog.Window.AddFlags(global::Android.Views.WindowManagerFlags.ShowWhenLocked);
+                                    dialog.Window.AddFlags(global::Android.Views.WindowManagerFlags.TurnScreenOn);
+                                    dialog.Window.SetSoftInputMode(global::Android.Views.SoftInput.AdjustResize | global::Android.Views.SoftInput.StateAlwaysHidden);
 
-                                        dialog.Show();   
-                                        #endregion
+                                    // dim whatever is behind the dialog
+                                    dialog.Window.AddFlags(global::Android.Views.WindowManagerFlags.DimBehind);
+                                    dialog.Window.Attributes.DimAmount = 0.75f;
 
-                                        #region voice recognizer
+                                    dialog.Show();  
+                                    #endregion
 
-                                        new Thread(() =>
-                                            {
-                                                // wait for the dialog to be shown so it doesn't hide our speech recognizer activity
-                                                dialogShowWait.WaitOne();
+                                    #region voice recognizer
+                                    new Thread(() =>
+                                        {
+                                            // wait for the dialog to be shown so it doesn't hide our speech recognizer activity
+                                            dialogShowWait.WaitOne();
 
-                                                // there's a slight race condition between the dialog showing and speech recognition showing. pause here to prevent the dialog from hiding the speech recognizer.
-                                                Thread.Sleep(1000);
+                                            // there's a slight race condition between the dialog showing and speech recognition showing. pause here to prevent the dialog from hiding the speech recognizer.
+                                            Thread.Sleep(1000);
 
-                                                Intent intent = new Intent(RecognizerIntent.ActionRecognizeSpeech);
-                                                intent.PutExtra(RecognizerIntent.ExtraLanguageModel, RecognizerIntent.LanguageModelFreeForm);
-                                                intent.PutExtra(RecognizerIntent.ExtraSpeechInputCompleteSilenceLengthMillis, 1500);
-                                                intent.PutExtra(RecognizerIntent.ExtraSpeechInputPossiblyCompleteSilenceLengthMillis, 1500);
-                                                intent.PutExtra(RecognizerIntent.ExtraSpeechInputMinimumLengthMillis, 15000);
-                                                intent.PutExtra(RecognizerIntent.ExtraMaxResults, 1);
-                                                intent.PutExtra(RecognizerIntent.ExtraLanguage, Java.Util.Locale.Default);
-                                                intent.PutExtra(RecognizerIntent.ExtraPrompt, prompt);
+                                            Intent intent = new Intent(RecognizerIntent.ActionRecognizeSpeech);
+                                            intent.PutExtra(RecognizerIntent.ExtraLanguageModel, RecognizerIntent.LanguageModelFreeForm);
+                                            intent.PutExtra(RecognizerIntent.ExtraSpeechInputCompleteSilenceLengthMillis, 1500);
+                                            intent.PutExtra(RecognizerIntent.ExtraSpeechInputPossiblyCompleteSilenceLengthMillis, 1500);
+                                            intent.PutExtra(RecognizerIntent.ExtraSpeechInputMinimumLengthMillis, 15000);
+                                            intent.PutExtra(RecognizerIntent.ExtraMaxResults, 1);
+                                            intent.PutExtra(RecognizerIntent.ExtraLanguage, Java.Util.Locale.Default);
+                                            intent.PutExtra(RecognizerIntent.ExtraPrompt, prompt);
 
-                                                mainActivity.GetActivityResultAsync(intent, AndroidActivityResultRequestCode.RecognizeSpeech, result =>
+                                            mainActivity.GetActivityResultAsync(intent, AndroidActivityResultRequestCode.RecognizeSpeech, result =>
+                                                {
+                                                    if (result != null && result.Item1 == Result.Ok)
                                                     {
-                                                        if (result != null && result.Item1 == Result.Ok)
-                                                        {
-                                                            IList<string> matches = result.Item2.GetStringArrayListExtra(RecognizerIntent.ExtraResults);
-                                                            if (matches != null && matches.Count > 0)
-                                                                mainActivity.RunOnUiThread(() =>
-                                                                    {
-                                                                        inputEdit.Text = matches[0];
-                                                                    });
-                                                        }
-                                                    });
+                                                        IList<string> matches = result.Item2.GetStringArrayListExtra(RecognizerIntent.ExtraResults);
+                                                        if (matches != null && matches.Count > 0)
+                                                            mainActivity.RunOnUiThread(() =>
+                                                                {
+                                                                    inputEdit.Text = matches[0];
+                                                                });
+                                                    }
+                                                });
                                         
-                                            }).Start();
-                                        
-                                        #endregion
-                                    });
-                        });
+                                        }).Start();
+                                    #endregion
+                                });
+                            
+                        }, true, false);
 
                     dialogDismissWait.WaitOne();
                     callback(input);
@@ -387,56 +456,59 @@ namespace Sensus.Android
                 }).Start();
         }
 
-        #region notifications
+        #endregion
 
-        public override void UpdateApplicationStatus(string status)
-        {
-            IssueNotification("Sensus", status == null ? null : (status + " (tap to open)"), true, SERVICE_NOTIFICATION_TAG);
-        }
+        #region notifications
 
         public override void IssueNotificationAsync(string message, string id)
         {
-            IssueNotification("Sensus", message, false, id);
+            IssueNotificationAsync("Sensus", message, true, false, id);
         }
 
-        private void IssueNotification(string title, string body, bool sticky, string tag)
-        {            
-            if (body == null)
-                _notificationManager.Cancel(tag, 0);
-            else
+        public void IssueNotificationAsync(string title, string message, bool autoCancel, bool ongoing, string id)
+        {          
+            if (_notificationManager != null)
             {
-                TaskStackBuilder stackBuilder = TaskStackBuilder.Create(_service);
-                stackBuilder.AddParentStack(Java.Lang.Class.FromType(typeof(AndroidMainActivity)));
-                stackBuilder.AddNextIntent(new Intent(_service, typeof(AndroidMainActivity)));
-                PendingIntent pendingIntent = stackBuilder.GetPendingIntent(0, PendingIntentFlags.UpdateCurrent);
+                new Thread(() =>
+                    {
+                        if (message == null)
+                            _notificationManager.Cancel(id, 0);
+                        else
+                        {
+                            Intent activityIntent = new Intent(_service, typeof(AndroidMainActivity));
+                            PendingIntent pendingIntent = PendingIntent.GetActivity(_service, 0, activityIntent, PendingIntentFlags.UpdateCurrent);
+                            Notification notification = new Notification.Builder(_service)
+                                .SetContentTitle(title)
+                                .SetContentText(message)
+                                .SetSmallIcon(Resource.Drawable.ic_launcher)
+                                .SetContentIntent(pendingIntent)
+                                .SetAutoCancel(autoCancel)
+                                .SetSound(RingtoneManager.GetDefaultUri(RingtoneType.Notification))
+                                .SetVibrate(new long[] { 0, 250, 50, 250 })
+                                .SetOngoing(ongoing).Build();
 
-                Notification notification = new Notification.Builder(_service)
-                    .SetContentTitle(title)
-                    .SetContentText(body)
-                    .SetSmallIcon(Resource.Drawable.ic_launcher)
-                    .SetContentIntent(pendingIntent)
-                    .SetAutoCancel(!sticky)
-                    .SetOngoing(sticky).Build();
+                            _notificationManager.Notify(id, 0, notification);
+                        }
 
-                _notificationManager.Notify(tag, 0, notification);
+                    }).Start();
             }
         }
 
-        public override void FlashNotificationAsync(string message, Action callback)
+        protected override void ProtectedFlashNotificationAsync(string message, bool flashLaterIfNotVisible, Action callback)
         {
             new Thread(() =>
                 {
-                    GetMainActivityAsync(false, mainActivity =>
+                    RunActionUsingMainActivityAsync(mainActivity =>
                         {
-                            if (mainActivity != null)
-                                mainActivity.RunOnUiThread(() =>
-                                    {
-                                        Toast.MakeText(mainActivity, message, ToastLength.Long).Show();
+                            mainActivity.RunOnUiThread(() =>
+                                {
+                                    Toast.MakeText(mainActivity, message, ToastLength.Long).Show();
 
-                                        if (callback != null)
-                                            callback();
-                                    });
-                        });
+                                    if (callback != null)
+                                        callback();
+                                });
+                            
+                        }, false, flashLaterIfNotVisible);
                     
                 }).Start();
         }
@@ -449,44 +521,85 @@ namespace Sensus.Android
             !(probe is ListeningPointsOfInterestProximityProbe);
         }
 
+        public override Xamarin.Forms.ImageSource GetQrCodeImageSource(string contents)
+        {            
+            return Xamarin.Forms.ImageSource.FromStream(() =>
+                {
+                    Bitmap bitmap = BarcodeWriter.Write(contents);
+                    MemoryStream ms = new MemoryStream();
+                    bitmap.Compress(Bitmap.CompressFormat.Png, 100, ms);
+                    ms.Seek(0, SeekOrigin.Begin);
+                    return ms;
+                });
+        }
+
         #endregion
 
         #region callback scheduling
 
-        protected override void ScheduleRepeatingCallback(string callbackId, int initialDelayMS, int repeatDelayMS, string userNotificationMessage)
+        protected override void ScheduleRepeatingCallback(string callbackId, int initialDelayMS, int repeatDelayMS, bool repeatLag)
         {            
-            long initialTimeMS = Java.Lang.JavaSystem.CurrentTimeMillis() + initialDelayMS;
-
-            Logger.Log("Callback " + callbackId + " scheduled for " + (new DateTimeOffset(1970, 1, 1, 0, 0, 0, new TimeSpan()).AddMilliseconds(initialTimeMS)) + " (repeating).", LoggingLevel.Debug, GetType());
-
-            AlarmManager alarmManager = _service.GetSystemService(Context.AlarmService) as AlarmManager;
-            alarmManager.SetRepeating(AlarmType.RtcWakeup, initialTimeMS, repeatDelayMS, GetCallbackIntent(callbackId, true));
+            DateTime callbackTime = DateTime.Now.AddMilliseconds(initialDelayMS);
+            Logger.Log("Callback " + callbackId + " scheduled for " + callbackTime + " (repeating).", LoggingLevel.Normal, GetType());
+            ScheduleCallbackAlarm(CreateCallbackIntent(callbackId, true, repeatDelayMS, repeatLag), callbackTime);
         }
 
-        protected override void ScheduleOneTimeCallback(string callbackId, int delayMS, string userNotificationMessage)
+        protected override void ScheduleOneTimeCallback(string callbackId, int delayMS)
         {
-            long timeMS = Java.Lang.JavaSystem.CurrentTimeMillis() + delayMS;
-
-            Logger.Log("Callback " + callbackId + " scheduled for " + (new DateTimeOffset(1970, 1, 1, 0, 0, 0, 0, new TimeSpan()).AddMilliseconds(timeMS)) + " (one-time).", LoggingLevel.Debug, GetType());
-
-            AlarmManager alarmManager = _service.GetSystemService(Context.AlarmService) as AlarmManager;
-            alarmManager.Set(AlarmType.RtcWakeup, timeMS, GetCallbackIntent(callbackId, false));
+            DateTime callbackTime = DateTime.Now.AddMilliseconds(delayMS);
+            Logger.Log("Callback " + callbackId + " scheduled for " + callbackTime + " (one-time).", LoggingLevel.Normal, GetType());
+            ScheduleCallbackAlarm(CreateCallbackIntent(callbackId, false, 0, false), callbackTime);
         }
 
-        protected override void UnscheduleCallback(string callbackId, bool repeating)
+        private PendingIntent CreateCallbackIntent(string callbackId, bool repeating, int repeatDelayMS, bool repeatLag)
         {
-            AlarmManager alarmManager = _service.GetSystemService(Context.AlarmService) as AlarmManager;
-            alarmManager.Cancel(GetCallbackIntent(callbackId, repeating));
+            Intent callbackIntent = new Intent(_service, typeof(AndroidSensusService));
+            callbackIntent.PutExtra(SENSUS_CALLBACK_KEY, true);
+            callbackIntent.PutExtra(SENSUS_CALLBACK_ID_KEY, callbackId);
+            callbackIntent.PutExtra(SENSUS_CALLBACK_REPEATING_KEY, repeating);
+            callbackIntent.PutExtra(SENSUS_CALLBACK_REPEAT_DELAY_KEY, repeatDelayMS);
+            callbackIntent.PutExtra(SENSUS_CALLBACK_REPEAT_LAG_KEY, repeatLag);
+
+            PendingIntent callbackPendingIntent = PendingIntent.GetService(_service, callbackId.GetHashCode(), callbackIntent, PendingIntentFlags.CancelCurrent);  // upon hash collisions on the request code, the previous intent will simply be canceled.
+
+            lock (_callbackIdPendingIntent)
+                _callbackIdPendingIntent.Add(callbackId, callbackPendingIntent);
+
+            return callbackPendingIntent;
         }
 
-        private PendingIntent GetCallbackIntent(string callbackId, bool repeating)
+        public void ScheduleCallbackAlarm(PendingIntent callbackPendingIntent, DateTime callbackTime)
         {
-            Intent serviceIntent = new Intent(_service, typeof(AndroidSensusService));
-            serviceIntent.PutExtra(SENSUS_CALLBACK_KEY, true);
-            serviceIntent.PutExtra(SENSUS_CALLBACK_ID_KEY, callbackId);
-            serviceIntent.PutExtra(SENSUS_CALLBACK_REPEATING_KEY, repeating);
+            AlarmManager alarmManager = _service.GetSystemService(Context.AlarmService) as AlarmManager;
 
-            return PendingIntent.GetService(_service, callbackId.GetHashCode(), serviceIntent, PendingIntentFlags.CancelCurrent);  // upon hash collisions, the previous intent will simply be canceled.
+            long delayMS = (long)(callbackTime - DateTime.Now).TotalMilliseconds;
+            long callbackTimeMS = Java.Lang.JavaSystem.CurrentTimeMillis() + delayMS;
+
+            // https://github.com/predictive-technology-laboratory/sensus/wiki/Backwards-Compatibility
+            #if __ANDROID_23__
+            if (Build.VERSION.SdkInt >= BuildVersionCodes.M)
+                alarmManager.SetExactAndAllowWhileIdle(AlarmType.RtcWakeup, callbackTimeMS, callbackPendingIntent);  // API level 23 added "while idle" option, making things even tighter.
+            else if (Build.VERSION.SdkInt >= BuildVersionCodes.Kitkat)
+                alarmManager.SetExact(AlarmType.RtcWakeup, callbackTimeMS, callbackPendingIntent);  // API level 19 differentiated Set (loose) from SetExact (tight)
+            else
+            #endif
+            {
+                alarmManager.Set(AlarmType.RtcWakeup, callbackTimeMS, callbackPendingIntent);  // API 1-18 treats Set as a tight alarm
+            }            
+        }
+
+        protected override void UnscheduleCallbackPlatformSpecific(string callbackId)
+        {
+            lock (_callbackIdPendingIntent)
+            {
+                PendingIntent callbackPendingIntent;
+                if (_callbackIdPendingIntent.TryGetValue(callbackId, out callbackPendingIntent))
+                {
+                    AlarmManager alarmManager = _service.GetSystemService(Context.AlarmService) as AlarmManager;
+                    alarmManager.Cancel(callbackPendingIntent);
+                    _callbackIdPendingIntent.Remove(callbackId);
+                }
+            }
         }
 
         #endregion
@@ -496,23 +609,30 @@ namespace Sensus.Android
         public override void KeepDeviceAwake()
         {
             lock (_wakeLock)
+            {
                 _wakeLock.Acquire();
+                Logger.Log("Wake lock acquisition count:  " + ++_wakeLockAcquisitionCount, LoggingLevel.Normal, GetType());
+            }
         }
 
         public override void LetDeviceSleep()
         {
             lock (_wakeLock)
+            {
                 _wakeLock.Release();
+                Logger.Log("Wake lock acquisition count:  " + --_wakeLockAcquisitionCount, LoggingLevel.Normal, GetType());
+            }
         }
 
         public override void BringToForeground()
         {
             ManualResetEvent foregroundWait = new ManualResetEvent(false);
 
-            GetMainActivityAsync(true, mainActivity =>
+            RunActionUsingMainActivityAsync(mainActivity =>
                 {
                     foregroundWait.Set();
-                });
+
+                }, true, false);
 
             foregroundWait.WaitOne();
         }
@@ -521,24 +641,11 @@ namespace Sensus.Android
 
         public override void Stop()
         {
+            // stop protocols and clean up
             base.Stop();
 
-            UpdateApplicationStatus(null);
-
-            if (_mainActivity != null)
-                _mainActivity.Finish();
-
             if (_service != null)
-                _service.StopSelf();
-        }
-
-        public override void Dispose()
-        {
-            UpdateApplicationStatus(null);
-
-            _textToSpeech.Dispose();
-
-            base.Dispose();
+                _service.Stop();
         }
     }
 }

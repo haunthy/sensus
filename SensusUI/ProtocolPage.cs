@@ -49,9 +49,24 @@ namespace SensusUI
             views.AddRange(UiProperty.GetPropertyStacks(_protocol));
 
             #region data stores
+            string localDataStoreSize = null;
+            try
+            {
+                if (protocol.LocalDataStore != null)
+                {
+                    if (protocol.LocalDataStore is RamLocalDataStore)
+                        localDataStoreSize = (protocol.LocalDataStore as RamLocalDataStore).DataCount + " items";
+                    else if (protocol.LocalDataStore is FileLocalDataStore)
+                        localDataStoreSize = Math.Round(SensusServiceHelper.GetDirectorySizeMB((protocol.LocalDataStore as FileLocalDataStore).StorageDirectory), 1) + " MB";
+                }
+            }
+            catch (Exception)
+            {
+            }
+
             Button editLocalDataStoreButton = new Button
             {
-                Text = "Local Data Store",
+                Text = "Local Data Store" + (localDataStoreSize == null ? "" : " (" + localDataStoreSize + ")"),
                 FontSize = 20,
                 HorizontalOptions = LayoutOptions.FillAndExpand,
                 IsEnabled = !_protocol.Running
@@ -125,9 +140,7 @@ namespace SensusUI
 
             pointsOfInterestButton.Clicked += async (o, e) =>
             {
-                await Navigation.PushAsync(new PointsOfInterestPage(
-                        _protocol.PointsOfInterest,
-                        () => UiBoundSensusServiceHelper.Get(true).SaveAsync()));
+                await Navigation.PushAsync(new PointsOfInterestPage(_protocol.PointsOfInterest));
             };
 
             views.Add(pointsOfInterestButton);
@@ -176,12 +189,16 @@ namespace SensusUI
             {
                 if (lockButton.Text == "Lock")
                 {
-                    UiBoundSensusServiceHelper.Get(true).PromptForInputAsync(
-                            
+                    SensusServiceHelper.Get().PromptForInputAsync(
                         "Lock Protocol",
-
-                        new TextInput("Password:"),
-                            
+                        new SingleLineTextInput("Password:", Keyboard.Text, true),
+                        null,
+                        true,
+                        null,
+                        null,
+                        null,
+                        null,
+                        false,
                         input =>
                         {
                             if (input == null)
@@ -189,13 +206,11 @@ namespace SensusUI
                                 
                             string password = input.Value as string;
 
-                            if (password == null)
-                                return;
-                            else if (string.IsNullOrWhiteSpace(password))
-                                UiBoundSensusServiceHelper.Get(true).FlashNotificationAsync("Please enter a non-empty password.");
+                            if (string.IsNullOrWhiteSpace(password))
+                                SensusServiceHelper.Get().FlashNotificationAsync("Please enter a non-empty password.");
                             else
                             {
-                                _protocol.LockPasswordHash = UiBoundSensusServiceHelper.Get(true).GetHash(password);
+                                _protocol.LockPasswordHash = SensusServiceHelper.Get().GetHash(password);
                                 Device.BeginInvokeOnMainThread(() => lockButton.Text = "Unlock");
                             }
                         });
@@ -231,11 +246,11 @@ namespace SensusUI
                                                  .Where(t => !t.IsAbstract && t.IsSubclassOf(dataStoreType))
                                                  .Select(t => Activator.CreateInstance(t))
                                                  .Cast<DataStore>()
-                                                 .OrderBy(d => d.Name)
+                                                 .OrderBy(d => d.DisplayName)
                                                  .ToList();
 
             string cancelButtonName = "Cancel";
-            string selected = await DisplayActionSheet("Select " + (local ? "Local" : "Remote") + " Data Store", cancelButtonName, null, dataStores.Select((d, i) => (i + 1) + ") " + d.Name).ToArray());
+            string selected = await DisplayActionSheet("Select " + (local ? "Local" : "Remote") + " Data Store", cancelButtonName, null, dataStores.Select((d, i) => (i + 1) + ") " + d.DisplayName).ToArray());
             if (!string.IsNullOrWhiteSpace(selected) && selected != cancelButtonName)
                 await Navigation.PushAsync(new DataStorePage(_protocol, dataStores[int.Parse(selected.Substring(0, selected.IndexOf(")"))) - 1], local, true));
         }

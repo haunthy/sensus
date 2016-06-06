@@ -38,7 +38,7 @@ namespace SensusUI
         /// </summary>
         /// <param name="pointsOfInterest">Points of interest to display.</param>
         /// <param name="changeCallback">Called when a POI is added/deleted.</param>
-        public PointsOfInterestPage(List<PointOfInterest> pointsOfInterest, Action changeCallback)
+        public PointsOfInterestPage(List<PointOfInterest> pointsOfInterest)
         {
             _pointsOfInterest = pointsOfInterest;
 
@@ -63,9 +63,6 @@ namespace SensusUI
                         _pointsOfInterest.Remove(selectedPointOfInterest);
                         _pointsOfInterestList.SelectedItem = null;  // reset it manually, since it isn't done automatically.
 
-                        if (changeCallback != null)
-                            changeCallback();
-
                         Bind();
                     }
                 }
@@ -77,18 +74,21 @@ namespace SensusUI
 
             ToolbarItems.Add(new ToolbarItem(null, "plus.png", () =>
                     {
-                        UiBoundSensusServiceHelper.Get(true).PromptForInputsAsync(
-
+                        SensusServiceHelper.Get().PromptForInputsAsync(
                             "Define Point Of Interest", 
-
                             new Input[]
                             {
-                                new TextInput("POI Name:"),
-                                new TextInput("POI Type:"),
-                                new TextInput("Address:"),
-                                new YesNoInput("View Map:")
+                                new SingleLineTextInput("POI Name:", Keyboard.Text) { Required = false },
+                                new SingleLineTextInput("POI Type:", Keyboard.Text) { Required = false },
+                                new SingleLineTextInput("Address:", Keyboard.Text) { Required = false }
                             },
-
+                            null,
+                            true, 
+                            null,
+                            null,
+                            null,
+                            null,
+                            false,
                             inputs =>
                             {
                                 if (inputs == null)
@@ -97,10 +97,9 @@ namespace SensusUI
                                 string name = inputs[0].Value as string;
                                 string type = inputs[1].Value as string;
                                 string address = inputs[2].Value as string;
-                                bool viewMap = (bool)inputs[3].Value;
 
                                 if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(type))
-                                    UiBoundSensusServiceHelper.Get(true).FlashNotificationAsync("You must enter either a name or type (or both).");
+                                    SensusServiceHelper.Get().FlashNotificationAsync("You must enter either a name or type (or both).");
                                 else
                                 {
                                     Action<List<Position>> addPOI = new Action<List<Position>>(poiPositions =>
@@ -112,9 +111,6 @@ namespace SensusUI
                                                         {
                                                             _pointsOfInterest.Add(new PointOfInterest(name, type, poiPosition.ToGeolocationPosition()));
 
-                                                            if (changeCallback != null)
-                                                                changeCallback();
-
                                                             Bind();
                                                         }
                                                 });
@@ -124,28 +120,19 @@ namespace SensusUI
 
                                     if (string.IsNullOrWhiteSpace(address))
                                     {
-                                        // set up a new cancellation token source, cancelling the existing one if present.
-                                        if (_gpsCancellationTokenSource == null)
-                                            _gpsCancellationTokenSource = new CancellationTokenSource();
-                                        else if (!_gpsCancellationTokenSource.IsCancellationRequested)
+                                        // cancel existing token source if we have one
+                                        if (_gpsCancellationTokenSource != null && !_gpsCancellationTokenSource.IsCancellationRequested)
                                             _gpsCancellationTokenSource.Cancel();
 
                                         _gpsCancellationTokenSource = new CancellationTokenSource();
                                         
-                                        Xamarin.Geolocation.Position gpsPosition = GpsReceiver.Get().GetReading(_gpsCancellationTokenSource.Token);
+                                        Plugin.Geolocator.Abstractions.Position gpsPosition = GpsReceiver.Get().GetReading(_gpsCancellationTokenSource.Token);
 
                                         if (gpsPosition != null)
-                                        {                                            
-                                            Position formsPosition = gpsPosition.ToFormsPosition();
-
-                                            if (viewMap)
-                                                UiBoundSensusServiceHelper.Get(true).GetPositionsFromMapAsync(formsPosition, newPinName, addPOI);
-                                            else
-                                                addPOI(new Position[] { formsPosition }.ToList());
-                                        }
+                                            SensusServiceHelper.Get().GetPositionsFromMapAsync(gpsPosition.ToFormsPosition(), newPinName, addPOI);
                                     }
                                     else
-                                        UiBoundSensusServiceHelper.Get(true).GetPositionsFromMapAsync(address, newPinName, addPOI);
+                                        SensusServiceHelper.Get().GetPositionsFromMapAsync(address, newPinName, addPOI);
                                 }
                             });
                     }));

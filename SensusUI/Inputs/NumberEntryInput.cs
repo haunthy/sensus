@@ -14,51 +14,29 @@
 
 using System;
 using Xamarin.Forms;
+using Newtonsoft.Json;
 
 namespace SensusUI.Inputs
 {
     public class NumberEntryInput : Input
     {
         private Entry _entry;
-
-        public override View View
-        {
-            get
-            {
-                if (base.View == null)
-                {
-                    _entry = new Entry
-                    {
-                        Keyboard = Keyboard.Numeric,
-                        HorizontalOptions = LayoutOptions.FillAndExpand
-                    };  
-
-                    _entry.TextChanged += (o, e) => Complete = Value != null;
-
-                    base.View = new StackLayout
-                    {
-                        Orientation = StackOrientation.Horizontal,
-                        HorizontalOptions = LayoutOptions.FillAndExpand,
-                        Children = { Label, _entry }
-                    };
-                }
-
-                return base.View;
-            }
-        }
+        private Label _label;
+        private bool _hasFocused;
 
         public override object Value
         {
             get
             {
                 double value;
-                if (_entry == null || !double.TryParse(_entry.Text, out value))
+                if (_entry == null || !_hasFocused || !double.TryParse(_entry.Text, out value))
                     return null;
                 else
                     return value;
             }
         }
 
+        [JsonIgnore]
         public override bool Enabled
         {
             get
@@ -91,6 +69,62 @@ namespace SensusUI.Inputs
         public NumberEntryInput(string name, string labelText)
             : base(name, labelText)
         {            
-        }           
+        }
+
+        public override View GetView(int index)
+        {
+            if (base.GetView(index) == null)
+            {
+                _entry = new Entry
+                {
+                    Text = "Provide response here.",
+                    FontSize = 20,
+                    Keyboard = Keyboard.Numeric,
+                    HorizontalOptions = LayoutOptions.FillAndExpand
+
+                    // set the style ID on the view so that we can retrieve it when unit testing
+                    #if UNIT_TESTING
+                    , StyleId = Name
+                    #endif
+                };
+
+                Color defaultTextColor = _entry.TextColor;
+                _entry.TextColor = Color.Gray;
+                _hasFocused = false;
+                _entry.Focused += (o, e) =>
+                {
+                    if (!_hasFocused)
+                    {
+                        _entry.Text = "";
+                        _entry.TextColor = defaultTextColor;
+                        _hasFocused = true;
+                    }
+                };
+
+                _entry.TextChanged += (o, e) =>
+                {
+                    Complete = Value != null;
+                };
+
+                _label = CreateLabel(index);
+
+                base.SetView(new StackLayout
+                    {
+                        Orientation = StackOrientation.Vertical,
+                        VerticalOptions = LayoutOptions.Start,
+                        Children = { _label, _entry }
+                    });
+            }
+            else
+            {
+                _label.Text = GetLabelText(index);  // if the view was already initialized, just update the label since the index might have changed.
+
+                // if the view is not enabled, there should be no tip text since the user can't do anything with the entry.
+                if (!Enabled && !_hasFocused)
+                    _entry.Text = "";
+            }                    
+
+            return base.GetView(index);
+        }
     }
 }

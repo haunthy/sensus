@@ -17,6 +17,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using Xamarin.Forms;
+using SensusService;
 
 namespace SensusUI
 {
@@ -30,8 +31,9 @@ namespace SensusUI
         /// </summary>
         /// <param name="title">Title of page.</param>
         /// <param name="lines">Lines to display.</param>
+        /// <param name="shareCallback">Called when the user clicks the Share button.</param>
         /// <param name="clearCallback">Called when the user clicks the Clear button.</param>
-        public ViewTextLinesPage(string title, List<string> lines, Action clearCallback)
+        public ViewTextLinesPage(string title, List<string> lines, Action shareCallback, Action clearCallback)
         {
             Title = title;
 
@@ -40,67 +42,55 @@ namespace SensusUI
             messageList.ItemTemplate.SetBinding(TextCell.TextProperty, new Binding(".", mode: BindingMode.OneWay));
             messageList.ItemsSource = new ObservableCollection<string>(lines);
 
-            Button shareButton = new Button
-            {
-                Text = "Share",
-                FontSize = 20,
-                HorizontalOptions = LayoutOptions.FillAndExpand
-            };
-
-            shareButton.Clicked += (o, e) =>
-                {
-                    string path = null;
-                    try
-                    {
-                        path = UiBoundSensusServiceHelper.Get(true).GetSharePath(".txt");
-                        using (StreamWriter file = new StreamWriter(path))
-                        {
-                            foreach (string line in lines)
-                                file.WriteLine(line);
-
-                            file.Close();
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        UiBoundSensusServiceHelper.Get(true).Logger.Log("Failed to write lines to temp file for sharing:  " + ex.Message, SensusService.LoggingLevel.Normal, GetType());
-                        path = null;
-                    }
-
-                    if (path != null)
-                        UiBoundSensusServiceHelper.Get(true).ShareFileAsync(path, title + ":  " + Path.GetFileName(path));
-                };
-
-            Button clearButton = new Button
-            {
-                Text = "Clear",
-                FontSize = 20,
-                HorizontalOptions = LayoutOptions.FillAndExpand,
-                IsEnabled = clearCallback != null
-            };
-
-            if (clearCallback != null)
-                clearButton.Clicked += async (o, e) =>
-                    {
-                        if (await DisplayAlert("Confirm", "Do you wish to clear the list? This cannot be undone.", "OK", "Cancel"))
-                        {
-                            clearCallback();
-                            messageList.ItemsSource = null;
-                        }
-                    };
-
-            StackLayout shareClearStack = new StackLayout
+            StackLayout buttonStack = new StackLayout
             {
                 Orientation = StackOrientation.Horizontal,
                 HorizontalOptions = LayoutOptions.FillAndExpand,
-                Children = { shareButton, clearButton }
             };
+            
+            if (shareCallback != null)
+            {
+                Button shareButton = new Button
+                {
+                    Text = "Share",
+                    FontSize = 20,
+                    HorizontalOptions = LayoutOptions.FillAndExpand
+                };
+
+                shareButton.Clicked += (o, e) =>
+                {
+                    shareCallback();
+                };
+
+                buttonStack.Children.Add(shareButton);
+            }            
+            
+            if (clearCallback != null)
+            {
+                Button clearButton = new Button
+                {
+                    Text = "Clear",
+                    FontSize = 20,
+                    HorizontalOptions = LayoutOptions.FillAndExpand,
+                };
+
+                clearButton.Clicked += async (o, e) =>
+                {
+                    if (await DisplayAlert("Confirm", "Do you wish to clear the list? This cannot be undone.", "Yes", "No"))
+                    {
+                        clearCallback();
+                        messageList.ItemsSource = null;
+                    }
+                };
+
+                buttonStack.Children.Add(clearButton);
+            }
 
             Content = new StackLayout
             {
                 Orientation = StackOrientation.Vertical,
                 VerticalOptions = LayoutOptions.FillAndExpand,
-                Children = { messageList, shareClearStack }
+                Children = { messageList, buttonStack }
             };
         }
     }

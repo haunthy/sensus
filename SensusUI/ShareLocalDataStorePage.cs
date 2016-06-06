@@ -78,54 +78,38 @@ namespace SensusUI
             contentLayout.Children.Add(cancelButton);
                                       
             new Thread(() =>
-                {                    
-                    string sharePath = UiBoundSensusServiceHelper.Get(true).GetSharePath(".json");
+                {         
+                    string sharePath = null;
                     bool errorWritingShareFile = false;
                     try
                     {     
-                        // step 1:  gather data.
-                        Device.BeginInvokeOnMainThread(() => statusLabel.Text = "Gathering data...");
-                        List<Datum> localData = localDataStore.GetDataForRemoteDataStore(_cancellationTokenSource.Token, progress =>
+                        sharePath = SensusServiceHelper.Get().GetSharePath(".zip");
+
+                        int numDataWritten = localDataStore.WriteDataToZipFile(sharePath, _cancellationTokenSource.Token, (message, progress) =>
                             {
-                                Device.BeginInvokeOnMainThread(() =>
+                                Device.BeginInvokeOnMainThread(async () =>
                                     {
-                                        progressBar.ProgressTo(progress, 250, Easing.Linear);
+                                        uint duration = 250;
+
+                                        if (message != null)
+                                        {
+                                            statusLabel.Text = message;
+                                            duration = 0;
+                                        }
+                                        
+                                        await progressBar.ProgressTo(progress, duration, Easing.Linear);
                                     });
-                            });                                
+                            });    
 
-                        // step 2:  write gathered data to file.
-                        if (!_cancellationTokenSource.IsCancellationRequested)
-                        {
-                            Device.BeginInvokeOnMainThread(() =>
-                                {
-                                    progressBar.ProgressTo(0, 0, Easing.Linear);
-                                    statusLabel.Text = "Writing data to file...";
-                                });
-                            
-                            using (StreamWriter shareFile = new StreamWriter(sharePath))
-                            {
-                                int dataWritten = 0;
-                                foreach (Datum localDatum in localData)
-                                {
-                                    if (_cancellationTokenSource.IsCancellationRequested)
-                                        break;
-                                    
-                                    shareFile.WriteLine(localDatum.GetJSON(localDataStore.Protocol.JsonAnonymizer));
-
-                                    if (localData.Count >= 10 && (++dataWritten % (localData.Count / 10)) == 0)
-                                        Device.BeginInvokeOnMainThread(() => progressBar.ProgressTo(dataWritten / (double)localData.Count, 250, Easing.Linear));
-                                }
-
-                                shareFile.Close();
-                            }
-                        }
+                        if (numDataWritten == 0)
+                            throw new Exception("No data to share.");
                     }
                     catch (Exception ex)
                     {
                         errorWritingShareFile = true;
-                        string message = "Error writing share file:  " + ex.Message;
-                        UiBoundSensusServiceHelper.Get(true).FlashNotificationAsync(message);
-                        UiBoundSensusServiceHelper.Get(true).Logger.Log(message, LoggingLevel.Normal, GetType());
+                        string message = "Error sharing data:  " + ex.Message;
+                        SensusServiceHelper.Get().FlashNotificationAsync(message);
+                        SensusServiceHelper.Get().Logger.Log(message, LoggingLevel.Normal, GetType());
                     }
 
                     if (_cancellationTokenSource.IsCancellationRequested || errorWritingShareFile)
@@ -133,22 +117,23 @@ namespace SensusUI
                         // always delete the file on cancel / error
                         try
                         {
-                            File.Delete(sharePath);
+                            if (File.Exists(sharePath))
+                                File.Delete(sharePath);
                         }
                         catch (Exception)
                         {
                         }
 
-                        // the only way to get a cancellation event is to back out of the window, so only pop if there was an error
-                        if(errorWritingShareFile)
+                        // if the window has already been popped then the token will have been cancelled. pop the window if needed.
+                        if (!_cancellationTokenSource.IsCancellationRequested)
                             Device.BeginInvokeOnMainThread(async () => await Navigation.PopAsync());
                     }
                     else
                     {
-                        Device.BeginInvokeOnMainThread(async () => 
+                        Device.BeginInvokeOnMainThread(async () =>
                             {
                                 await Navigation.PopAsync();
-                                UiBoundSensusServiceHelper.Get(true).ShareFileAsync(sharePath, "Sensus Data");
+                                SensusServiceHelper.Get().ShareFileAsync(sharePath, "Sensus Data:  " + localDataStore.Protocol.Name, "application/zip");
                             });
                     }
 

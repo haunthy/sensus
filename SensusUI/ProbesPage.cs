@@ -45,7 +45,8 @@ namespace SensusUI
 
             public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
             {
-                throw new SensusException("Invalid call to " + GetType().FullName + ".ConvertBack.");
+                new SensusException("Invalid call to " + GetType().FullName + ".ConvertBack.");
+                return null;
             }
         }
 
@@ -62,7 +63,8 @@ namespace SensusUI
 
             public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
             {
-                throw new SensusException("Invalid call to " + GetType().FullName + ".ConvertBack.");
+                new SensusException("Invalid call to " + GetType().FullName + ".ConvertBack.");
+                return null;
             }
         }
 
@@ -80,7 +82,8 @@ namespace SensusUI
 
             public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
             {
-                throw new SensusException("Invalid call to " + GetType().FullName + ".ConvertBack.");
+                new SensusException("Invalid call to " + GetType().FullName + ".ConvertBack.");
+                return null;
             }
         }
 
@@ -127,7 +130,7 @@ namespace SensusUI
                     if(await DisplayAlert("Enable All Probes", "Are you sure you want to enable all probes?", "Yes", "No"))
                     {
                         foreach(Probe probe in _protocol.Probes)
-                            if(UiBoundSensusServiceHelper.Get(true).EnableProbeWhenEnablingAll(probe))
+                            if(SensusServiceHelper.Get().EnableProbeWhenEnablingAll(probe))
                                 probe.Enabled = true;
 
                         Bind();
@@ -152,6 +155,14 @@ namespace SensusUI
         {
             _probesList.ItemsSource = null;
             _probesList.ItemsSource = _protocol.Probes;
+        }
+
+        protected override void OnDisappearing()
+        {
+            base.OnDisappearing();
+
+            foreach (Probe probe in _protocol.Probes)
+                probe.OriginallyEnabled = probe.Enabled;
         }
     }
 }

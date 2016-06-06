@@ -20,6 +20,7 @@ using Foundation;
 using System.IO;
 using SensusService;
 using System.Threading;
+using Plugin.Permissions.Abstractions;
 
 namespace Sensus.iOS.Probes.Context
 {
@@ -28,7 +29,7 @@ namespace Sensus.iOS.Probes.Context
     /// </summary>
     public class iOSSoundProbe : SoundProbe
     {
-        NSDictionary _settings;
+        private NSDictionary _settings;
 
         protected override void Initialize()
         {
@@ -50,14 +51,15 @@ namespace Sensus.iOS.Probes.Context
         }
 
         protected override IEnumerable<Datum> Poll(System.Threading.CancellationToken cancellationToken)
-        {            
+        {               
             AVAudioRecorder recorder = null;
             string recordPath = Path.GetTempFileName();
             try
             {
+                if (SensusServiceHelper.Get().ObtainPermission(Permission.Microphone) != PermissionStatus.Granted)
+                    throw new Exception("Cannot access microphone.");
+                
                 AVAudioSession audioSession = AVAudioSession.SharedInstance();
-
-                audioSession.RequestRecordPermission(granted => SensusServiceHelper.Get().Logger.Log("Audio record permission granted:  " + granted, LoggingLevel.Verbose, GetType()));
 
                 NSError error = audioSession.SetCategory(AVAudioSessionCategory.Record);
                 if (error != null)
@@ -82,10 +84,6 @@ namespace Sensus.iOS.Probes.Context
                 }
                 else
                     throw new Exception("Failed to start recording.");
-            }
-            catch (Exception)
-            {
-                return new Datum[] { };
             }
             finally
             {

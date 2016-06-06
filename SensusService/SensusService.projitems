@@ -20,7 +20,6 @@
     <Compile Include="$(MSBuildThisFileDirectory)Exceptions\SensusException.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)ImpreciseDatum.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)LoggingLevel.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)Probes\Apps\RunningAppsDatum.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\Communication\SmsDatum.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\Communication\TelephonyDatum.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\Communication\TelephonyState.cs" />
@@ -31,7 +30,6 @@
     <Compile Include="$(MSBuildThisFileDirectory)Probes\Device\ScreenDatum.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\Location\CompassProbe.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\ListeningProbe.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)Probes\Apps\RunningAppsProbe.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\Communication\SmsProbe.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\Context\BluetoothDeviceProximityProbe.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\Context\LightProbe.cs" />
@@ -53,9 +51,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)Probes\Probe.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\User\ProbeTriggerProperties\BooleanProbeTriggerProperty.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\User\ProbeTriggerProperties\ListProbeTriggerProperty.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)Probes\User\ProbeTriggerProperties\NumberProbeTriggerProperty.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\User\ProbeTriggerProperties\ProbeTriggerProperty.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)Probes\User\ProbeTriggerProperties\TextProbeTriggerProperty.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\User\Script.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\User\ScriptProbe.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\User\ScriptDatum.cs" />
@@ -63,7 +59,6 @@
     <Compile Include="$(MSBuildThisFileDirectory)Probes\User\TriggerValueCondition.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Protocol.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Logger.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)ProtocolReport.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)SensusServiceHelper.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)DataStores\Remote\AmazonS3RemoteDataStore.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Anonymization\AnonymizedJsonContractResolver.cs" />
@@ -94,7 +89,6 @@
     <Compile Include="$(MSBuildThisFileDirectory)Probes\Location\PointOfInterestProximityTrigger.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\Location\PointOfInterestProximityDatum.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\Location\ListeningPointsOfInterestProximityProbe.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)DataStores\Remote\MicrosoftAzureRemoteDataStore.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\User\ScriptRunner.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Anonymization\Anonymizers\StringHashAnonymizer.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)ExtensionMethods.cs" />
@@ -102,6 +96,18 @@
     <Compile Include="$(MSBuildThisFileDirectory)Probes\Communication\PollingTelephonyProbe.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\Context\AmbientTemperatureDatum.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Probes\Context\ListeningAmbientTemperatureProbe.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Probes\User\Health\HeightDatum.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Probes\User\Health\BiologicalSexDatum.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Probes\User\Health\BirthdateDatum.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Probes\User\Health\BloodTypeDatum.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Probes\User\Health\BiologicalSex.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Probes\User\Health\BloodType.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)ProtocolReportDatum.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)ParticipationRewardDatum.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)ScheduledCallback.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Probes\User\ScriptRunDatum.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Probes\User\ProbeTriggerProperties\DoubleProbeTriggerProperty.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Probes\User\ProbeTriggerProperties\StringProbeTriggerProperty.cs" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="$(MSBuildThisFileDirectory)Anonymization\" />

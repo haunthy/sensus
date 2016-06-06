@@ -17,14 +17,23 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using Newtonsoft.Json;
+using System.Linq;
+using System.Threading.Tasks;
 
 namespace SensusService.Probes
 {
     public abstract class PollingProbe : Probe
     {
+        /// <summary>
+        /// It's important to mitigate lag in polling operations since participation assessments are done on the basis of poll rates.
+        /// </summary>
+        private const bool POLL_CALLBACK_LAG = false;
+
         private int _pollingSleepDurationMS;
+        private int _pollingTimeoutMinutes;
         private bool _isPolling;
         private string _pollCallbackId;
+        private List<DateTime> _pollTimes;
 
         private readonly object _locker = new object();
 
@@ -32,7 +41,7 @@ namespace SensusService.Probes
         public virtual int PollingSleepDurationMS
         {
             get { return _pollingSleepDurationMS; }
-            set 
+            set
             {
                 if (value <= 1000)
                     value = 1000;
@@ -42,29 +51,105 @@ namespace SensusService.Probes
                     _pollingSleepDurationMS = value; 
 
                     if (_pollCallbackId != null)
-                        _pollCallbackId = SensusServiceHelper.Get().RescheduleRepeatingCallback(_pollCallbackId, _pollingSleepDurationMS, _pollingSleepDurationMS);
+                        _pollCallbackId = SensusServiceHelper.Get().RescheduleRepeatingCallback(_pollCallbackId, _pollingSleepDurationMS, _pollingSleepDurationMS, POLL_CALLBACK_LAG);
                 }
+            }
+        }
+
+        [EntryIntegerUiProperty("Timeout (Mins.):", true, 6)]
+        public int PollingTimeoutMinutes
+        {
+            get
+            {
+                return _pollingTimeoutMinutes;
+            }
+            set
+            {
+                if (value < 1)
+                    value = 1;
+                
+                _pollingTimeoutMinutes = value;
             }
         }
 
         [JsonIgnore]
         public abstract int DefaultPollingSleepDurationMS { get; }
 
+        protected override float RawParticipation
+        {
+            get
+            {
+                int oneDayMS = (int)new TimeSpan(1, 0, 0, 0).TotalMilliseconds;
+                float pollsPerDay = oneDayMS / (float)_pollingSleepDurationMS;
+                float fullParticipationPolls = pollsPerDay * Protocol.ParticipationHorizonDays;
+
+                lock (_pollTimes)
+                {
+                    return _pollTimes.Count(pollTime => pollTime >= Protocol.ParticipationHorizon) / fullParticipationPolls;
+                }
+            }
+        }
+
+        public List<DateTime> PollTimes
+        {
+            get { return _pollTimes; }
+        }
+
+        public override string CollectionDescription
+        {
+            get
+            {
+                TimeSpan interval = new TimeSpan(0, 0, 0, 0, _pollingSleepDurationMS);
+
+                double value = -1;
+                string unit;
+                int decimalPlaces = 0;
+
+                if (interval.TotalSeconds <= 60)
+                {
+                    value = interval.TotalSeconds;
+                    unit = "second";
+                    decimalPlaces = 1;
+                }
+                else if (interval.TotalMinutes <= 60)
+                {
+                    value = interval.TotalMinutes;
+                    unit = "minute";
+                }
+                else if (interval.TotalHours <= 24)
+                {
+                    value = interval.TotalHours;
+                    unit = "hour";
+                }
+                else
+                {
+                    value = interval.TotalDays;
+                    unit = "day";
+                }
+
+                value = Math.Round(value, decimalPlaces);
+
+                if (value == 1)
+                    return DisplayName + ":  Once per " + unit + ".";
+                else
+                    return DisplayName + ":  Every " + value + " " + unit + "s.";
+            }
+        }
+
         protected PollingProbe()
         {
             _pollingSleepDurationMS = DefaultPollingSleepDurationMS;
+            _pollingTimeoutMinutes = 5;
             _isPolling = false;
             _pollCallbackId = null;
+            _pollTimes = new List<DateTime>();
         }
 
-        /// <summary>
-        /// Starts this probe. Throws an exception if start fails.
-        /// </summary>
-        public override void Start()
+        protected override void InternalStart()
         {
             lock (_locker)
             {
-                base.Start();
+                base.InternalStart();
 
                 #if __IOS__
                 string userNotificationMessage = DisplayName + " data requested.";
@@ -76,42 +161,54 @@ namespace SensusService.Probes
                 #error "Unrecognized platform."
                 #endif
 
-                _pollCallbackId = SensusServiceHelper.Get().ScheduleRepeatingCallback(cancellationToken =>
+                ScheduledCallback callback = new ScheduledCallback((callbackId, cancellationToken, letDeviceSleepCallback) =>
                     {
-                        if (Running)
-                        {
-                            _isPolling = true;
-
-                            IEnumerable<Datum> data = null;
-                            try
+                        return Task.Run(() =>
                             {
-                                SensusServiceHelper.Get().Logger.Log("Polling.", LoggingLevel.Verbose, GetType());
-                                data = Poll(cancellationToken);
-                            }
-                            catch (Exception ex)
-                            {
-                                SensusServiceHelper.Get().Logger.Log("Failed to poll:  " + ex.Message, LoggingLevel.Normal, GetType());
-                            }
-
-                            if (data != null)
-                                foreach (Datum datum in data)
+                                if (Running)
                                 {
-                                    if(cancellationToken.IsCancellationRequested)
-                                        break;
-                                    
+                                    _isPolling = true;
+
+                                    IEnumerable<Datum> data = null;
                                     try
                                     {
-                                        StoreDatum(datum);
+                                        SensusServiceHelper.Get().Logger.Log("Polling.", LoggingLevel.Normal, GetType());
+                                        data = Poll(cancellationToken);
+
+                                        lock (_pollTimes)
+                                        {
+                                            _pollTimes.Add(DateTime.Now);
+                                            _pollTimes.RemoveAll(pollTime => pollTime < Protocol.ParticipationHorizon);
+                                        }
                                     }
                                     catch (Exception ex)
                                     {
-                                        SensusServiceHelper.Get().Logger.Log("Failed to store datum:  " + ex.Message, LoggingLevel.Normal, GetType());
+                                        SensusServiceHelper.Get().Logger.Log("Failed to poll:  " + ex.Message, LoggingLevel.Normal, GetType());
                                     }
-                                }
 
-                            _isPolling = false;
-                        }
-                    }, GetType().FullName + " Poll", 0, _pollingSleepDurationMS, userNotificationMessage);
+                                    if (data != null)
+                                        foreach (Datum datum in data)
+                                        {
+                                            if (cancellationToken.IsCancellationRequested)
+                                                break;
+
+                                            try
+                                            {
+                                                StoreDatum(datum);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                SensusServiceHelper.Get().Logger.Log("Failed to store datum:  " + ex.Message, LoggingLevel.Normal, GetType());
+                                            }
+                                        }
+
+                                    _isPolling = false;
+                                }
+                            });
+
+                    }, GetType().FullName + " Poll", TimeSpan.FromMinutes(_pollingTimeoutMinutes), userNotificationMessage);
+
+                _pollCallbackId = SensusServiceHelper.Get().ScheduleRepeatingCallback(callback, 0, _pollingSleepDurationMS, POLL_CALLBACK_LAG);
             }
         }
 
@@ -123,7 +220,7 @@ namespace SensusService.Probes
             {
                 base.Stop();
 
-                SensusServiceHelper.Get().UnscheduleRepeatingCallback(_pollCallbackId);
+                SensusServiceHelper.Get().UnscheduleCallback(_pollCallbackId);
                 _pollCallbackId = null;
             }
         }
@@ -135,11 +232,27 @@ namespace SensusService.Probes
             if (Running)
             {
                 double msElapsedSincePreviousStore = (DateTimeOffset.UtcNow - MostRecentStoreTimestamp).TotalMilliseconds;
-                if (!_isPolling && msElapsedSincePreviousStore > (_pollingSleepDurationMS + 5000))  // system timer callbacks aren't always fired exactly as scheduled, resulting in health tests that identify warning conditions for delayed polling. allow a small fudge factor to ignore these warnings.
+                int allowedLagMS = 5000;
+                if (!_isPolling &&
+                    _pollingSleepDurationMS <= int.MaxValue - allowedLagMS && // some probes (iOS HealthKit) have polling delays set to int.MaxValue. if we add to this (as we're about to do in the next check), we'll wrap around to 0 resulting in incorrect statuses. only do the check if we won't wrap around.
+                    msElapsedSincePreviousStore > (_pollingSleepDurationMS + allowedLagMS))  // system timer callbacks aren't always fired exactly as scheduled, resulting in health tests that identify warning conditions for delayed polling. allow a small fudge factor to ignore these warnings.
                     warning += "Probe \"" + GetType().FullName + "\" has not stored data in " + msElapsedSincePreviousStore + "ms (polling delay = " + _pollingSleepDurationMS + "ms)." + Environment.NewLine;
             }
 
             return restart;
+        }
+
+        public override void ResetForSharing()
+        {
+            base.ResetForSharing();
+
+            _isPolling = false;
+            _pollCallbackId = null;
+
+            lock (_pollTimes)
+            {
+                _pollTimes.Clear();
+            }
         }
     }
 }

@@ -21,9 +21,9 @@ namespace SensusService.Probes.Network
     /// </summary>
     public abstract class CellTowerProbe : ListeningProbe
     {
-        protected sealed override string DefaultDisplayName
+        public sealed override string DisplayName
         {
-            get { return "Cell Tower"; }
+            get { return "Cell Tower Binding"; }
         }
 
         public sealed override Type DatumType

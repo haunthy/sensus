@@ -13,19 +13,20 @@
 // limitations under the License.
 
 using System;
-using Xamarin.Geolocation;
 using SensusService.Probes.Location;
+using Plugin.Geolocator.Abstractions;
+using Plugin.Permissions.Abstractions;
 
 namespace SensusService.Probes.Movement
 {
     public class ListeningSpeedProbe : ListeningProbe
-    {        
+    {
         private EventHandler<PositionEventArgs> _positionChangedHandler;
         private Position _previousPosition;
 
         private readonly object _locker = new object();
 
-        protected sealed override string DefaultDisplayName
+        public sealed override string DisplayName
         {
             get
             {
@@ -45,15 +46,20 @@ namespace SensusService.Probes.Movement
         {
             _positionChangedHandler = (o, e) =>
             {
+                if (e.Position == null)
+                    return;
+                    
                 lock (_locker)
                 {
                     SensusServiceHelper.Get().Logger.Log("Received position change notification.", LoggingLevel.Verbose, GetType());
 
-                    if (_previousPosition != null && e.Position != null && e.Position.Timestamp != _previousPosition.Timestamp)
-                        StoreDatum(new SpeedDatum(e.Position.Timestamp, _previousPosition, e.Position));
-
-                    if (e.Position != null)
+                    if (_previousPosition == null)
                         _previousPosition = e.Position;
+                    else if (e.Position.Timestamp > _previousPosition.Timestamp)  // it has happened (rarely) that positions come in out of order...drop any such positions.
+                    {
+                        StoreDatum(new SpeedDatum(e.Position.Timestamp, _previousPosition, e.Position));
+                        _previousPosition = e.Position;
+                    }
                 }
             };
         }
@@ -62,11 +68,11 @@ namespace SensusService.Probes.Movement
         {
             base.Initialize();
 
-            if (!GpsReceiver.Get().Locator.IsGeolocationEnabled)
+            if (SensusServiceHelper.Get().ObtainPermission(Permission.Location) != PermissionStatus.Granted)
             {
                 // throw standard exception instead of NotSupportedException, since the user might decide to enable GPS in the future
                 // and we'd like the probe to be restarted at that time.
-                string error = "Geolocation is not enabled on this device. Cannot start speed probe.";
+                string error = "Geolocation is not permitted on this device. Cannot start speed probe.";
                 SensusServiceHelper.Get().FlashNotificationAsync(error);
                 throw new Exception(error);
             }
@@ -75,7 +81,14 @@ namespace SensusService.Probes.Movement
         protected sealed override void StartListening()
         {
             _previousPosition = null;
-            GpsReceiver.Get().AddListener(_positionChangedHandler);
+            GpsReceiver.Get().AddListener(_positionChangedHandler, false);
+        }
+
+        public override void ResetForSharing()
+        {
+            base.ResetForSharing();
+
+            _previousPosition = null;
         }
 
         protected sealed override void StopListening()

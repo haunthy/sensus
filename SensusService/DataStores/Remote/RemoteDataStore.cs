@@ -15,6 +15,7 @@
 using SensusUI.UiProperties;
 using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace SensusService.DataStores.Remote
 {
@@ -45,7 +46,7 @@ namespace SensusService.DataStores.Remote
             _requireWiFi = true;
             _requireCharging = true;
 
-            #if DEBUG
+            #if DEBUG || UNIT_TESTING
             CommitDelayMS = 10000;  // 10 seconds...so we can see debugging output quickly
             #else
             CommitDelayMS = 1000 * 60 * 30;  // every 30 minutes
@@ -57,17 +58,17 @@ namespace SensusService.DataStores.Remote
             List<Datum> dataToCommit = new List<Datum>();
 
             if (cancellationToken.IsCancellationRequested)
-                SensusServiceHelper.Get().Logger.Log("Cancelled retrieval of data from local data store.", LoggingLevel.Verbose, GetType());
+                SensusServiceHelper.Get().Logger.Log("Cancelled retrieval of data from local data store.", LoggingLevel.Normal, GetType());
             else if (!Protocol.LocalDataStore.UploadToRemoteDataStore)
-                SensusServiceHelper.Get().Logger.Log("Remote data store upload is disabled.", LoggingLevel.Verbose, GetType());
+                SensusServiceHelper.Get().Logger.Log("Remote data store upload is disabled.", LoggingLevel.Normal, GetType());
             else if (_requireWiFi && !SensusServiceHelper.Get().WiFiConnected)
-                SensusServiceHelper.Get().Logger.Log("Required WiFi but device WiFi is not connected.", LoggingLevel.Verbose, GetType());
+                SensusServiceHelper.Get().Logger.Log("Required WiFi but device WiFi is not connected.", LoggingLevel.Normal, GetType());
             else if (_requireCharging && !SensusServiceHelper.Get().IsCharging)
-                SensusServiceHelper.Get().Logger.Log("Required charging but device is not charging.", LoggingLevel.Verbose, GetType());
+                SensusServiceHelper.Get().Logger.Log("Required charging but device is not charging.", LoggingLevel.Normal, GetType());
             else
             {
                 dataToCommit = Protocol.LocalDataStore.GetDataForRemoteDataStore(cancellationToken);
-                SensusServiceHelper.Get().Logger.Log("Retrieved " + dataToCommit.Count + " data elements from local data store.", LoggingLevel.Debug, GetType());
+                SensusServiceHelper.Get().Logger.Log("Retrieved " + dataToCommit.Count + " data elements from local data store.", LoggingLevel.Normal, GetType());
             }
 
             return dataToCommit;
@@ -77,5 +78,9 @@ namespace SensusService.DataStores.Remote
         {
             Protocol.LocalDataStore.ClearDataCommittedToRemoteDataStore(committedData);
         }
+
+        public abstract string GetDatumKey(Datum datum);
+
+        public abstract Task<T> GetDatum<T>(string datumKey, CancellationToken cancellationToken) where T : Datum;
     }
 }

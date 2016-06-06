@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System;
-using Xamarin.Geolocation;
 using SensusService.Probes.User.ProbeTriggerProperties;
 using SensusService.Anonymization;
 using SensusService.Anonymization.Anonymizers;
@@ -31,7 +30,7 @@ namespace SensusService.Probes.Location
         private ProximityThresholdDirection _triggerDistanceDirection;
 
         [Anonymizable("POI Name:", typeof(StringHashAnonymizer), false)]
-        [TextProbeTriggerProperty("POI Name")]
+        [StringProbeTriggerProperty("POI Name")]
         public string PoiName
         {
             get
@@ -45,7 +44,7 @@ namespace SensusService.Probes.Location
         }
 
         [Anonymizable("POI Type:", typeof(StringHashAnonymizer), false)]
-        [TextProbeTriggerProperty("POI Type")]
+        [StringProbeTriggerProperty("POI Type")]
         public string PoiType
         {
             get
@@ -58,8 +57,8 @@ namespace SensusService.Probes.Location
             }
         }
 
-        [Anonymizable("POI Latitude:", new Type[] { typeof(DoubleRoundingTenthsAnonymizer), typeof(DoubleRoundingHundredthsAnonymizer), typeof(DoubleRoundingThousandthsAnonymizer) }, 1)]  // rounding to hundredths is roughly 1km
-        [NumberProbeTriggerProperty("POI Latitude")]
+        [Anonymizable("POI Latitude:", new Type[] { typeof(DoubleRoundingTenthsAnonymizer), typeof(DoubleRoundingHundredthsAnonymizer), typeof(DoubleRoundingThousandthsAnonymizer) }, -1)]
+        [DoubleProbeTriggerProperty("POI Latitude")]
         public double PoiLatitude
         {
             get
@@ -72,8 +71,8 @@ namespace SensusService.Probes.Location
             }
         }
 
-        [Anonymizable("POI Longitude:", new Type[] { typeof(DoubleRoundingTenthsAnonymizer), typeof(DoubleRoundingHundredthsAnonymizer), typeof(DoubleRoundingThousandthsAnonymizer) }, 1)]  // rounding to hundredths is roughly 1km
-        [NumberProbeTriggerProperty("POI Longitude")]
+        [Anonymizable("POI Longitude:", new Type[] { typeof(DoubleRoundingTenthsAnonymizer), typeof(DoubleRoundingHundredthsAnonymizer), typeof(DoubleRoundingThousandthsAnonymizer) }, -1)]
+        [DoubleProbeTriggerProperty("POI Longitude")]
         public double PoiLongitude
         {
             get
@@ -86,8 +85,8 @@ namespace SensusService.Probes.Location
             }
         }
 
-        [Anonymizable("Distance (Meters):", new Type[] { typeof(DoubleRoundingTensAnonymizer), typeof(DoubleRoundingHundredsAnonymizer)}, -1)]
-        [NumberProbeTriggerProperty("Distance (Meters)")]
+        [Anonymizable("Distance (Meters):", new Type[] { typeof(DoubleRoundingTensAnonymizer), typeof(DoubleRoundingHundredsAnonymizer) }, -1)]
+        [DoubleProbeTriggerProperty("Distance (Meters)")]
         public double DistanceToPoiMeters
         {
             get
@@ -130,12 +129,12 @@ namespace SensusService.Probes.Location
             {
                 return Math.Round(_distanceToPoiMeters) + "m from " + _poiName + (string.IsNullOrWhiteSpace(_poiType) ? "" : " (" + _poiType + ")");
             }
-        }        
+        }
 
         /// <summary>
         /// For JSON deserialization.
         /// </summary>
-        private PointOfInterestProximityDatum() 
+        private PointOfInterestProximityDatum()
         {
         }
 

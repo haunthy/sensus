@@ -21,9 +21,17 @@ namespace SensusService.Probes.Communication
     /// </summary>
     public abstract class ListeningTelephonyProbe : ListeningProbe
     {
-        protected sealed override string DefaultDisplayName
+        public sealed override string DisplayName
         {
-            get { return "Phone Calls"; }
+            get { return "Phone Call"; }
+        }
+
+        public override string CollectionDescription
+        {
+            get
+            {
+                return DisplayName + ":  When calls are made.";
+            }
         }
 
         public sealed override Type DatumType

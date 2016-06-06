@@ -33,18 +33,34 @@ namespace Sensus.Android.Probes.Communication
             {
                 Bundle bundle = intent.Extras;
                 if (bundle != null)
-                {
+                {      
                     try
                     {
                         Java.Lang.Object[] pdus = (Java.Lang.Object[])bundle.Get("pdus");
                         for (int i = 0; i < pdus.Length; i++)
                         {
-                            SmsMessage message = SmsMessage.CreateFromPdu((byte[])pdus[i]);
+                            SmsMessage message;
+
+                            // https://github.com/predictive-technology-laboratory/sensus/wiki/Backwards-Compatibility
+                            #if __ANDROID_23__
+                            if (Build.VERSION.SdkInt >= BuildVersionCodes.M)
+                                message = SmsMessage.CreateFromPdu((byte[])pdus[i], intent.GetStringExtra("format"));  // API 23
+                            else
+                            #endif
+                            {
+                                // ignore deprecation warning
+                                #pragma warning disable 618
+                                message = SmsMessage.CreateFromPdu((byte[])pdus[i]);
+                                #pragma warning restore 618
+                            }
+
                             DateTimeOffset timestamp = new DateTimeOffset(1970, 1, 1, 0, 0, 0, new TimeSpan()).AddMilliseconds(message.TimestampMillis);
                             INCOMING_SMS(this, new SmsDatum(timestamp, message.OriginatingAddress, null, message.MessageBody));
                         }
                     }
-                    catch (Exception) { }
+                    catch (Exception)
+                    {
+                    }
                 }
             }
         }

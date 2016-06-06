@@ -24,16 +24,30 @@ namespace SensusService.Probes.User
     public class Script
     {
         private ObservableCollection<InputGroup> _inputGroups;
-        private DateTimeOffset _firstRunTimestamp;
+        private DateTimeOffset? _firstRunTimestamp;
         private Datum _previousDatum;
         private Datum _currentDatum;
+        private DateTimeOffset? _presentationTimestamp;
+        private string _id;
+
+        public string Id
+        {
+            get
+            {
+                return _id;
+            }
+            set
+            {
+                _id = value;
+            }
+        }
 
         public ObservableCollection<InputGroup> InputGroups
         {
             get { return _inputGroups; }
         }
 
-        public DateTimeOffset FirstRunTimestamp
+        public DateTimeOffset? FirstRunTimestamp
         {
             get { return _firstRunTimestamp; }
             set { _firstRunTimestamp = value; }
@@ -49,28 +63,47 @@ namespace SensusService.Probes.User
         {
             get { return _currentDatum; }
             set { _currentDatum = value; }
-        }                                        
+        }
+
+        public DateTimeOffset? PresentationTimestamp
+        {
+            get
+            {
+                return _presentationTimestamp;
+            }
+            set
+            {
+                _presentationTimestamp = value;
+            }
+        }
 
         [JsonIgnore]
-        public bool Complete
+        public bool Valid
         {
-            get { return _inputGroups.Count == 0 || _inputGroups.All(g => g.Complete); }
+            get { return _inputGroups.Count == 0 || _inputGroups.All(inputGroup => inputGroup.Valid); }
         }
 
         [JsonIgnore]
         public TimeSpan Age
         {
-            get { return DateTimeOffset.UtcNow - _firstRunTimestamp; }
+            get { return DateTimeOffset.UtcNow - _firstRunTimestamp.Value; }
         }
 
         public Script()
-        {                        
+        {           
+            _id = Guid.NewGuid().ToString();
             _inputGroups = new ObservableCollection<InputGroup>();
         }
 
         public Script Copy()
         {
-            return JsonConvert.DeserializeObject<Script>(JsonConvert.SerializeObject(this, SensusServiceHelper.JSON_SERIALIZER_SETTINGS), SensusServiceHelper.JSON_SERIALIZER_SETTINGS);
+            Script copy = JsonConvert.DeserializeObject<Script>(JsonConvert.SerializeObject(this, SensusServiceHelper.JSON_SERIALIZER_SETTINGS), SensusServiceHelper.JSON_SERIALIZER_SETTINGS);
+
+            // a new GUID is set within the constructor, but it is immediately overwritten with the old id by the JSON deserializer. since the
+            // script id is what ties all of the script datum objects together, set a new unique script id here.
+            copy.Id = Guid.NewGuid().ToString();
+
+            return copy;
         }
     }
 }

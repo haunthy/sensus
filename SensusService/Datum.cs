@@ -32,15 +32,26 @@ namespace SensusService
         {
             TypeNameHandling = TypeNameHandling.All,
             ConstructorHandling = ConstructorHandling.AllowNonPublicDefaultConstructor,
-            NullValueHandling = NullValueHandling.Ignore  // datum objects can be anonymized by omitting values. this is accomplished by setting them to null, which means they aren't even rendered into JSON given this option.
+
+            // datum objects can be anonymized by omitting values. this is accomplished by setting them to null. also, some fields in datum 
+            // objects might have unreliably obtained values (e.g., GPS location might fail and be null). if we ignore fields with null
+            // values when serializing, the resulting JSON and other derived structures (e.g., data frames in R) will have differing columns. 
+            // so we should include null values to ensure that all JSON values are always included.
+            NullValueHandling = NullValueHandling.Include  
         };
 
         public static Datum FromJSON(string json)
         {
             Datum datum = null;
 
-            try { datum = JsonConvert.DeserializeObject<Datum>(json, JSON_SERIALIZER_SETTINGS); }
-            catch (Exception ex) { SensusServiceHelper.Get().Logger.Log("Failed to convert JSON to datum:  " + ex.Message, LoggingLevel.Normal, typeof(Datum)); }
+            try
+            {
+                datum = JsonConvert.DeserializeObject<Datum>(json, JSON_SERIALIZER_SETTINGS);
+            }
+            catch (Exception ex)
+            {
+                SensusServiceHelper.Get().Logger.Log("Failed to convert JSON to datum:  " + ex.Message, LoggingLevel.Normal, typeof(Datum));
+            }
 
             return datum;
         }
@@ -50,7 +61,7 @@ namespace SensusService
         private DateTimeOffset _timestamp;
         private string _protocolId;
         private int _hashCode;
-        private bool _anonymized;       
+        private bool _anonymized;
 
         public string Id
         {
@@ -74,7 +85,7 @@ namespace SensusService
         {
             get { return _timestamp; }
             set { _timestamp = value; }
-        } 
+        }
 
         public string ProtocolId
         {
@@ -86,7 +97,7 @@ namespace SensusService
             {
                 _protocolId = value;
             }
-        }  
+        }
 
         public bool Anonymized
         {
@@ -110,7 +121,7 @@ namespace SensusService
         {            
         }
 
-        protected Datum(DateTimeOffset timestamp)     
+        protected Datum(DateTimeOffset timestamp)
         {
             _timestamp = timestamp;
             _deviceId = SensusServiceHelper.Get().DeviceId;
@@ -118,11 +129,17 @@ namespace SensusService
             Id = Guid.NewGuid().ToString();
         }
 
-        public string GetJSON(AnonymizedJsonContractResolver anonymizationContractResolver)
+        public string GetJSON(AnonymizedJsonContractResolver anonymizationContractResolver, bool indented)
         {
             JSON_SERIALIZER_SETTINGS.ContractResolver = anonymizationContractResolver;
                        
-            return JsonConvert.SerializeObject(this, Formatting.None, JSON_SERIALIZER_SETTINGS).Replace('\n', ' ').Replace('\r', ' ');
+            string json = JsonConvert.SerializeObject(this, indented ? Formatting.Indented : Formatting.None, JSON_SERIALIZER_SETTINGS);
+
+            // if the json should not be indented, replace all newlines with white space
+            if (!indented)
+                json = json.Replace('\n', ' ').Replace('\r', ' ');
+
+            return json;
         }
 
         public override int GetHashCode()
@@ -138,8 +155,8 @@ namespace SensusService
         public override string ToString()
         {
             return "Type:  " + GetType().Name + Environment.NewLine +
-                   "Device ID:  " + _deviceId + Environment.NewLine + 
-                   "Timestamp:  " + _timestamp;
+            "Device ID:  " + _deviceId + Environment.NewLine +
+            "Timestamp:  " + _timestamp;
         }
     }
 }

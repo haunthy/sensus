@@ -17,7 +17,7 @@ using Newtonsoft.Json;
 using SensusService.Anonymization;
 using SensusService.Anonymization.Anonymizers;
 using SensusService.Probes.User.ProbeTriggerProperties;
-using Xamarin.Geolocation;
+using Plugin.Geolocator.Abstractions;
 
 namespace SensusService.Probes.Movement
 {
@@ -68,7 +68,7 @@ namespace SensusService.Probes.Movement
 
         private double _kph;
 
-        [NumberProbeTriggerProperty]
+        [DoubleProbeTriggerProperty]
         [Anonymizable(null, new Type[] { typeof(DoubleRoundingTensAnonymizer), typeof(DoubleRoundingHundredsAnonymizer) }, -1)]
         public double KPH
         {

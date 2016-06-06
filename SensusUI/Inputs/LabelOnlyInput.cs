@@ -14,22 +14,12 @@
 
 using System;
 using Xamarin.Forms;
+using Newtonsoft.Json;
 
 namespace SensusUI.Inputs
 {
     public class LabelOnlyInput : Input
     {
-        public override View View
-        {
-            get
-            {
-                if (base.View == null)
-                    base.View = Label;
-                
-                return base.View;
-            }
-        }
-
         public override object Value
         {
             get
@@ -38,15 +28,15 @@ namespace SensusUI.Inputs
             }
         }
 
+        [JsonIgnore]
         public override bool Enabled
         {
             get
             {
-                return Label.IsEnabled;
+                return true;
             }
             set
             {
-                Label.IsEnabled = value;
             }
         }
 
@@ -58,27 +48,64 @@ namespace SensusUI.Inputs
             }
         }
 
+        /// <summary>
+        /// Gets a value indicating whether this <see cref="SensusUI.Inputs.LabelOnlyInput"/> stores completion records. Always
+        /// returns false, since label-only inputs are complete by definition and repeated deserialization will accumulate
+        /// completion records that don't have meaning:  https://github.com/predictive-technology-laboratory/sensus/issues/126
+        /// </summary>
+        /// <value><c>false</c></value>
+        public override bool StoreCompletionRecords
+        {
+            get
+            {
+                return false;
+            }
+        }
+
         public LabelOnlyInput()
         {
-            Construct();
+            Construct(true);
         }
 
         public LabelOnlyInput(string labelText)
             : base(labelText)
         {
-            Construct();
+            Construct(true);
+        }
+
+        public LabelOnlyInput(string labelText, int labelFontSize)
+            : base(labelText, labelFontSize)
+        {
+            Construct(true);
+        }
+
+        public LabelOnlyInput(string labelText, bool complete)
+            : base(labelText)
+        {
+            Construct(complete);
         }
 
         public LabelOnlyInput(string name, string labelText)
             : base(name, labelText)
         {
-            Construct();
+            Construct(true);
         }
 
-        private void Construct()
+        private void Construct(bool complete)
         {
-            Complete = true;
-            ShouldBeStored = false;
+            Complete = complete;
+            Required = false;
+            DisplayNumber = false;
+            NeedsToBeStored = false;
+            Frame = false;
+        }
+
+        public override View GetView(int index)
+        {
+            if (base.GetView(index) == null)
+                base.SetView(CreateLabel(-1));
+
+            return base.GetView(index);
         }
     }
 }

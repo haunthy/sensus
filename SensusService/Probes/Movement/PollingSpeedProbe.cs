@@ -15,8 +15,9 @@
 using SensusService.Probes.Location;
 using System;
 using System.Collections.Generic;
-using Xamarin.Geolocation;
 using System.Threading;
+using Plugin.Geolocator.Abstractions;
+using Plugin.Permissions.Abstractions;
 
 namespace SensusService.Probes.Movement
 {
@@ -26,7 +27,7 @@ namespace SensusService.Probes.Movement
 
         private readonly object _locker = new object();
 
-        protected sealed override string DefaultDisplayName
+        public sealed override string DisplayName
         {
             get { return "Speed"; }
         }
@@ -38,7 +39,7 @@ namespace SensusService.Probes.Movement
 
         public sealed override int DefaultPollingSleepDurationMS
         {
-            get 
+            get
             {
                 return 15000; // every 15 seconds
             }
@@ -52,44 +53,59 @@ namespace SensusService.Probes.Movement
         {
             base.Initialize();
 
-            if (!GpsReceiver.Get().Locator.IsGeolocationEnabled)
+            if (SensusServiceHelper.Get().ObtainPermission(Permission.Location) != PermissionStatus.Granted)
             {
                 // throw standard exception instead of NotSupportedException, since the user might decide to enable GPS in the future
                 // and we'd like the probe to be restarted at that time.
-                string error = "Geolocation is not enabled on this device. Cannot start speed probe.";
+                string error = "Geolocation is not permitted on this device. Cannot start speed probe.";
                 SensusServiceHelper.Get().FlashNotificationAsync(error);
                 throw new Exception(error);
             }
         }
 
-        public override void Start()
+        protected override void InternalStart()
         {
             lock (_locker)
             {
                 _previousPosition = null;  // do this before starting the base-class poller so it doesn't race to grab a stale previous location.
-                base.Start();               
+                base.InternalStart();               
             }
-        }           
+        }
 
         protected override IEnumerable<Datum> Poll(CancellationToken cancellationToken)
         {
             lock (_locker)
             {
+                SpeedDatum datum = null;
+
                 Position currentPosition = GpsReceiver.Get().GetReading(cancellationToken);
 
-                Datum[] data = null;
-
-                if (_previousPosition == null || currentPosition == null || currentPosition.Timestamp == _previousPosition.Timestamp)
-                    data = new Datum[] { };
+                if (currentPosition == null)
+                    throw new Exception("Failed to get GPS reading.");
                 else
-                    data = new SpeedDatum[] { new SpeedDatum(currentPosition.Timestamp, _previousPosition, currentPosition) };
+                {
+                    if (_previousPosition == null)
+                        _previousPosition = currentPosition;
+                    else if (currentPosition.Timestamp > _previousPosition.Timestamp)  // it has happened (rarely) that positions come in out of order...drop any such positions.
+                    {
+                        datum = new SpeedDatum(currentPosition.Timestamp, _previousPosition, currentPosition);
+                        _previousPosition = currentPosition;
+                    }
+                }
 
-                if (currentPosition != null)
-                    _previousPosition = currentPosition;
-
-                return data;
+                if (datum == null)
+                    return new Datum[] { };  // datum will be null on the first poll and where polls return locations out of order (rare). these should count toward participation.
+                else
+                    return new Datum[] { datum };
             }
-        }            
+        }
+
+        public override void ResetForSharing()
+        {
+            base.ResetForSharing();
+
+            _previousPosition = null;
+        }
 
         public override void Stop()
         {

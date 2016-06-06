@@ -20,6 +20,9 @@ using System.Collections.ObjectModel;
 using SensusUI.Inputs;
 using System.Reflection;
 using System.Linq;
+using SensusService;
+using System.Collections;
+using System.Text.RegularExpressions;
 
 namespace SensusUI
 {
@@ -28,7 +31,7 @@ namespace SensusUI
         private InputGroup _inputGroup;
         private ListView _inputsList;
 
-        public ScriptInputsPage(InputGroup inputGroup)
+        public ScriptInputsPage(InputGroup inputGroup, List<InputGroup> previousInputGroups)
         {
             _inputGroup = inputGroup;
 
@@ -45,13 +48,23 @@ namespace SensusUI
                 Input selectedInput = _inputsList.SelectedItem as Input;
                 int selectedIndex = inputGroup.Inputs.IndexOf(selectedInput);
 
-                List<string> actions = new string[] { "Edit", "Delete" }.ToList();
-
-                if (selectedIndex < inputGroup.Inputs.Count - 1)
-                    actions.Insert(0, "Move Down");
+                List<string> actions = new List<string>();
 
                 if (selectedIndex > 0)
-                    actions.Insert(0, "Move Up");
+                    actions.Add("Move Up");
+                    
+                if (selectedIndex < inputGroup.Inputs.Count - 1)
+                    actions.Add("Move Down");
+
+                actions.Add("Edit");
+                    
+                if (previousInputGroups != null && previousInputGroups.Select(previousInputGroup => previousInputGroup.Inputs.Count).Sum() > 0)
+                    actions.Add("Add Display Condition");
+
+                if (selectedInput.DisplayConditions.Count > 0)
+                    actions.AddRange(new string[]{ "View Display Conditions" });
+
+                actions.Add("Delete");
                     
                 string selectedAction = await DisplayActionSheet(selectedInput.Name, "Cancel", null, actions.ToArray());
 
@@ -69,6 +82,77 @@ namespace SensusUI
                         
                     await Navigation.PushAsync(inputPage);
                     _inputsList.SelectedItem = null;
+                }
+                else if (selectedAction == "Add Display Condition")
+                {
+                    string abortMessage = "Condition is not complete. Abort?";
+
+                    SensusServiceHelper.Get().PromptForInputsAsync("Display Condition", new Input[]
+                        {
+                            new ItemPickerPageInput("Input:", previousInputGroups.SelectMany(previousInputGroup => previousInputGroup.Inputs.Cast<object>()).ToList()),
+                            new ItemPickerPageInput("Condition:", Enum.GetValues(typeof(InputValueCondition)).Cast<object>().ToList()),
+                            new ItemPickerPageInput("Conjunctive/Disjunctive:", new object[] { "Conjunctive", "Disjunctive" }.ToList())
+                        },
+                        null,
+                        true,
+                        null,
+                        null,
+                        abortMessage,
+                        null,
+                        false,
+                        inputs =>
+                        {
+                            if (inputs == null)
+                                return;
+
+                            if (inputs.All(input => input.Valid))
+                            {                   
+                                Input conditionInput = ((inputs[0] as ItemPickerPageInput).Value as IEnumerable<object>).First() as Input;
+                                InputValueCondition condition = (InputValueCondition)((inputs[1] as ItemPickerPageInput).Value as IEnumerable<object>).First();
+                                bool conjunctive = ((inputs[2] as ItemPickerPageInput).Value as IEnumerable<object>).First().Equals("Conjunctive");
+
+                                if (condition == InputValueCondition.IsComplete)
+                                    selectedInput.DisplayConditions.Add(new InputDisplayCondition(conditionInput, condition, null, conjunctive));
+                                else
+                                {
+                                    Regex uppercaseSplitter = new Regex(@"
+                                    (?<=[A-Z])(?=[A-Z][a-z]) |
+                                    (?<=[^A-Z])(?=[A-Z]) |
+                                    (?<=[A-Za-z])(?=[^A-Za-z])", RegexOptions.IgnorePatternWhitespace);
+
+                                    // show the user a required copy of the condition input and prompt for the condition value
+                                    Input conditionInputCopy = conditionInput.Copy();
+                                    conditionInputCopy.DisplayConditions.Clear();
+                                    conditionInputCopy.LabelText = "Value that " + conditionInputCopy.Name + " " + uppercaseSplitter.Replace(condition.ToString(), " ").ToLower() + ":";
+                                    conditionInputCopy.Required = true;
+
+                                    SensusServiceHelper.Get().PromptForInputAsync("Display Condition",
+                                        conditionInputCopy,
+                                        null,
+                                        true,
+                                        "OK",
+                                        null,
+                                        abortMessage,
+                                        null,
+                                        false,
+                                        input =>
+                                        {
+                                            if (input == null)
+                                                return;
+
+                                            if (input.Valid)
+                                                selectedInput.DisplayConditions.Add(new InputDisplayCondition(conditionInput, condition, input.Value, conjunctive));
+                                        });
+                                }
+                            }                            
+                        });                    
+                }
+                else if (selectedAction == "View Display Conditions")
+                {
+                    await Navigation.PushAsync(new ViewTextLinesPage("Display Conditions", selectedInput.DisplayConditions.Select(displayCondition => displayCondition.ToString()).ToList(), null, async () =>
+                            {
+                                selectedInput.DisplayConditions.Clear();
+                            }));
                 }
                 else if (selectedAction == "Delete")
                 {
@@ -97,7 +181,7 @@ namespace SensusUI
                             Input input = inputs[int.Parse(selected.Substring(0, selected.IndexOf(")"))) - 1];
 
                             if (input is VoiceInput && inputGroup.Inputs.Count > 0 || !(input is VoiceInput) && inputGroup.Inputs.Any(i => i is VoiceInput))
-                                UiBoundSensusServiceHelper.Get(true).FlashNotificationAsync("Voice inputs must reside in groups by themselves.");
+                                SensusServiceHelper.Get().FlashNotificationAsync("Voice inputs must reside in groups by themselves.");
                             else
                             {
                                 inputGroup.Inputs.Add(input);

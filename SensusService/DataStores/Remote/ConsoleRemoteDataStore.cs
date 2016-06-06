@@ -15,12 +15,16 @@
 using Newtonsoft.Json;
 using System.Collections.Generic;
 using System.Threading;
+using SensusUI.UiProperties;
+using System;
+using System.Threading.Tasks;
 
 namespace SensusService.DataStores.Remote
 {
     public class ConsoleRemoteDataStore : RemoteDataStore
     {
-        protected override string DisplayName
+        [JsonIgnore]
+        public override string DisplayName
         {
             get { return "Console"; }
         }
@@ -31,21 +35,34 @@ namespace SensusService.DataStores.Remote
             get { return false; }
         }
 
-        protected override List<Datum> CommitData(List<Datum> data, CancellationToken cancellationToken)
+        protected override Task<List<Datum>> CommitDataAsync(List<Datum> data, CancellationToken cancellationToken)
         {
-            List<Datum> committedData = new List<Datum>();
+            return Task.Run(() =>
+                {
+                    List<Datum> committedData = new List<Datum>();
 
-            foreach (Datum datum in data)
-            {
-                if (cancellationToken.IsCancellationRequested)
-                    break;
+                    foreach (Datum datum in data)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                            break;
                 
-                committedData.Add(datum);
+                        committedData.Add(datum);
 
-                SensusServiceHelper.Get().Logger.Log("Committed datum to remote console:  " + datum, LoggingLevel.Debug, GetType());
-            }
+                        SensusServiceHelper.Get().Logger.Log("Committed datum to remote console:  " + datum, LoggingLevel.Debug, GetType());
+                    }
 
-            return committedData;
+                    return committedData;
+                });
+        }
+
+        public override string GetDatumKey(Datum datum)
+        {
+            throw new Exception("Cannot retrieve datum key from Console Remote Data Store.");
+        }
+
+        public override Task<T> GetDatum<T>(string datumKey, CancellationToken cancellationToken)
+        {
+            throw new Exception("Cannot retrieve datum from Console Remote Data Store.");
         }
     }
 }

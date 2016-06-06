@@ -27,24 +27,24 @@ namespace SensusService.Probes.Communication
         private string _toNumber;
         private string _message;
 
-        [TextProbeTriggerProperty("From #")]
-        [Anonymizable("From #", typeof(StringHashAnonymizer), true)]
+        [StringProbeTriggerProperty("From #")]
+        [Anonymizable("From #", typeof(StringHashAnonymizer), false)]
         public string FromNumber
         {
             get { return _fromNumber; }
             set { _fromNumber = value == null ? "" : new Regex(@"[^0-9]").Replace(value, ""); }
         }
 
-        [TextProbeTriggerProperty("To #")]
-        [Anonymizable("To #", typeof(StringHashAnonymizer), true)]
+        [StringProbeTriggerProperty("To #")]
+        [Anonymizable("To #", typeof(StringHashAnonymizer), false)]
         public string ToNumber
         {
             get { return _toNumber; }
             set { _toNumber = value == null ? "" : new Regex(@"[^0-9]").Replace(value, ""); }
         }
 
-        [TextProbeTriggerProperty]
-        [Anonymizable(null, typeof(StringHashAnonymizer), true)]
+        [StringProbeTriggerProperty]
+        [Anonymizable(null, typeof(StringHashAnonymizer), false)]
         public string Message
         {
             get { return _message; }
@@ -59,7 +59,9 @@ namespace SensusService.Probes.Communication
         /// <summary>
         /// For JSON deserialization.
         /// </summary>
-        private SmsDatum() { }
+        private SmsDatum()
+        {
+        }
 
         public SmsDatum(DateTimeOffset timestamp, string fromNumber, string toNumber, string message)
             : base(timestamp)
@@ -72,9 +74,9 @@ namespace SensusService.Probes.Communication
         public override string ToString()
         {
             return base.ToString() + Environment.NewLine +
-                   "From:  " + _fromNumber + Environment.NewLine +
-                   "To:  " + _toNumber + Environment.NewLine +
-                   "Message:  " + _message;
+            "From:  " + _fromNumber + Environment.NewLine +
+            "To:  " + _toNumber + Environment.NewLine +
+            "Message:  " + _message;
         }
     }
 }

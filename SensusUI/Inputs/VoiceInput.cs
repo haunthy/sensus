@@ -28,6 +28,7 @@ namespace SensusUI.Inputs
         private string _outputMessage;
         private string _outputMessageRerun;
         private string _response;
+        private bool _enabled;
 
         [EntryStringUiProperty("Output Message:", true, 11)]
         public string OutputMessage
@@ -43,18 +44,6 @@ namespace SensusUI.Inputs
             set { _outputMessageRerun = value; }
         }
 
-        public override View View
-        {
-            get
-            {
-                return null;
-            }
-            protected set
-            {
-                throw new SensusException("Cannot set View on VoiceInput.");
-            }
-        }
-
         public override object Value
         {
             get
@@ -63,14 +52,16 @@ namespace SensusUI.Inputs
             }
         }
 
+        [JsonIgnore]
         public override bool Enabled
         {
             get
             {
-                return true;
+                return _enabled;
             }
             set
             {
+                _enabled = value;
             }
         }
 
@@ -84,34 +75,48 @@ namespace SensusUI.Inputs
 
         public VoiceInput()
         {
-            _outputMessage = "";
-            _outputMessageRerun = "";
+            Construct("", "");
         }
 
         public VoiceInput(string outputMessage, string outputMessageRerun)
             : base()
         {
-            _outputMessage = outputMessage;
-            _outputMessageRerun = outputMessageRerun;
+            Construct(outputMessage, outputMessageRerun);
         }
 
         public VoiceInput(string name, string outputMessage, string outputMessageRerun)
             : base(name, null)
         {
+            Construct(outputMessage, outputMessageRerun);
+        }
+
+        private void Construct(string outputMessage, string outputMessageRerun)
+        {
+            _enabled = true;
             _outputMessage = outputMessage;
             _outputMessageRerun = outputMessageRerun;
         }
 
-        public void RunAsync(Datum triggeringDatum, bool isRerun, DateTimeOffset firstRunTimestamp, Action<string> callback)
+        public override View GetView(int index)
+        {
+            return null;
+        }
+
+        protected override void SetView(View value)
+        {
+            new SensusException("Cannot set View on VoiceInput.");
+        }
+
+        public void RunAsync(DateTimeOffset? firstRunTimestamp, Action postDisplayCallback, Action<string> callback)
         {
             new Thread(() =>
                 {                    
                     string outputMessage = _outputMessage;
 
                     #region temporal analysis for rerun
-                    if (isRerun && !string.IsNullOrWhiteSpace(_outputMessageRerun))
+                    if (firstRunTimestamp.HasValue && !string.IsNullOrWhiteSpace(_outputMessageRerun))
                     {
-                        TimeSpan promptAge = DateTimeOffset.UtcNow - firstRunTimestamp;
+                        TimeSpan promptAge = DateTimeOffset.UtcNow - firstRunTimestamp.Value;
 
                         int daysAgo = (int)promptAge.TotalDays;
                         string daysAgoStr;
@@ -122,21 +127,22 @@ namespace SensusUI.Inputs
                         else
                             daysAgoStr = promptAge.TotalDays + " days ago";
 
-                        outputMessage = string.Format(_outputMessageRerun, daysAgoStr + " at " + firstRunTimestamp.ToLocalTime().DateTime.ToString("h:mm tt"));
+                        outputMessage = string.Format(_outputMessageRerun, daysAgoStr + " at " + firstRunTimestamp.Value.ToLocalTime().DateTime.ToString("h:mm tt"));
                     }
                     #endregion
 
                     SensusServiceHelper.Get().TextToSpeechAsync(outputMessage, () =>
                         {
-                            SensusServiceHelper.Get().RunVoicePromptAsync(outputMessage, response =>
+                            SensusServiceHelper.Get().RunVoicePromptAsync(outputMessage, postDisplayCallback, response =>
                                 {
+                                    Viewed = true;
+
                                     if (string.IsNullOrWhiteSpace(response))
                                         response = null;
 
                                     _response = response;
 
-                                    if(_response != null)
-                                        Complete = true;
+                                    Complete = _response != null;
 
                                     callback(_response);
                                 });
